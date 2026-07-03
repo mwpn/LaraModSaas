@@ -5,7 +5,7 @@
     <div>
         <form method="POST" action="{{ url('/logout') }}">
             @csrf
-            <button type="submit">Logout</button>
+            <button class="tenant-btn" type="submit">Logout</button>
         </form>
     </div>
 </header>

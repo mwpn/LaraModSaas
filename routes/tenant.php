@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 use Illuminate\Support\Facades\Route;
 use Modules\BaseFeature\Http\Controllers\BaseFeatureController;
+use Modules\BaseFeature\Http\Controllers\TenantAuthController;
 
 /*
 |--------------------------------------------------------------------------
@@ -18,12 +19,17 @@ use Modules\BaseFeature\Http\Controllers\BaseFeatureController;
 */
 
 Route::middleware('tenant_api_web')->group(function () {
-    Route::get('/login', function () {
-        return response()->json([
-            'message' => 'Tenant login entry point.',
-            'tenant_id' => tenant('id'),
-        ]);
-    })->name('login');
+    Route::middleware('guest:tenant')->group(function (): void {
+        Route::get('/login', [TenantAuthController::class, 'create'])
+            ->name('login');
+
+        Route::post('/login', [TenantAuthController::class, 'store'])
+            ->name('tenant.login.store');
+    });
+
+    Route::post('/logout', [TenantAuthController::class, 'destroy'])
+        ->middleware('auth:tenant')
+        ->name('tenant.logout');
 
     Route::get('/', [BaseFeatureController::class, 'landing'])
         ->name('tenant.home');

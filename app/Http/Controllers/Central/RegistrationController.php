@@ -26,15 +26,22 @@ class RegistrationController extends Controller
                 'regex:/^[a-z0-9]+(?:-[a-z0-9]+)*$/',
                 Rule::unique('domains', 'domain'),
             ],
+            'saas_type' => [
+                'nullable',
+                'string',
+                Rule::in(['universal', 'resto', 'hotel', 'tirta', 'netbilling']),
+            ],
         ]);
 
         $subdomain = strtolower($validated['subdomain']);
+        $saasType = strtolower($validated['saas_type'] ?? 'universal');
         $centralConnection = DB::connection(
             config('tenancy.database.central_connection', config('database.default'))
         );
         $tenant = new Tenant([
             'id' => $subdomain,
             'name' => $validated['business_name'],
+            'saas_type' => $saasType,
         ]);
 
         try {

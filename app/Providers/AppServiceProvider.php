@@ -6,13 +6,16 @@ namespace App\Providers;
 
 use Illuminate\Cache\RateLimiting\Limit;
 use Illuminate\Http\Request;
+use Illuminate\Support\Fluent;
 use Illuminate\Support\Facades\Event;
 use Illuminate\Support\Facades\RateLimiter;
 use Illuminate\Support\ServiceProvider;
 use Illuminate\Support\Str;
+use Illuminate\Support\Facades\View;
 use Stancl\Tenancy\Events\TenancyBootstrapped;
 use Stancl\Tenancy\Middleware\InitializeTenancyBySubdomain;
 use Stancl\Tenancy\Middleware\PreventAccessFromCentralDomains;
+use Throwable;
 
 class AppServiceProvider extends ServiceProvider
 {
@@ -87,6 +90,23 @@ class AppServiceProvider extends ServiceProvider
             }
 
             config(['modules.statuses' => $statuses]);
+
+            $tenantSetting = null;
+
+            if (class_exists(\Modules\BaseFeature\Models\TenantSetting::class)) {
+                try {
+                    if (\Illuminate\Support\Facades\Schema::connection('tenant')->hasTable('tenant_settings')) {
+                        $tenantSetting = \Modules\BaseFeature\Models\TenantSetting::query()->first();
+                    }
+                } catch (Throwable) {
+                }
+            }
+
+            View::share('tenantSetting', $tenantSetting ?: new Fluent([
+                'brand_name' => data_get($tenant, 'name') ?? data_get($tenant, 'id'),
+                'theme_color' => '#000000',
+                'description' => null,
+            ]));
         });
     }
 }
