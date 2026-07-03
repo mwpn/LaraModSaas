@@ -1,0 +1,13 @@
+<?php
+
+namespace {{ namespace }};
+
+{{ factoryImport }}
+use App\Traits\HasTenantUuid;
+use Illuminate\Database\Eloquent\Model;
+
+class {{ class }} extends Model
+{
+    {{ factory }}
+    use HasTenantUuid;
+}

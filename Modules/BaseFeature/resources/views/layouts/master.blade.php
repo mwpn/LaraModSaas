@@ -1,0 +1,20 @@
+<!DOCTYPE html>
+<html lang="{{ str_replace('_', '-', app()->getLocale()) }}">
+    <head>
+        <meta charset="utf-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <meta name="csrf-token" content="{{ csrf_token() }}">
+
+        <title>{{ tenant('name') ?? tenant('id') }} - Dashboard</title>
+    </head>
+    <body>
+        @include('basefeature::layouts.partials.header')
+        @include('basefeature::layouts.partials.sidebar')
+
+        <main>
+            @yield('content')
+        </main>
+
+        @include('basefeature::layouts.partials.footer')
+    </body>
+</html>

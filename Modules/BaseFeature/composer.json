@@ -1,0 +1,30 @@
+{
+    "name": "nwidart/basefeature",
+    "description": "",
+    "authors": [
+        {
+            "name": "Nicolas Widart",
+            "email": "n.widart@gmail.com"
+        }
+    ],
+    "extra": {
+        "laravel": {
+            "providers": [],
+            "aliases": {
+
+            }
+        }
+    },
+    "autoload": {
+        "psr-4": {
+            "Modules\\BaseFeature\\": "app/",
+            "Modules\\BaseFeature\\Database\\Factories\\": "database/factories/",
+            "Modules\\BaseFeature\\Database\\Seeders\\": "database/seeders/"
+        }
+    },
+    "autoload-dev": {
+        "psr-4": {
+            "Modules\\BaseFeature\\Tests\\": "tests/"
+        }
+    }
+}

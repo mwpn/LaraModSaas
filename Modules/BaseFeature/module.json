@@ -1,0 +1,11 @@
+{
+    "name": "BaseFeature",
+    "alias": "basefeature",
+    "description": "",
+    "keywords": [],
+    "priority": 0,
+    "providers": [
+        "Modules\\BaseFeature\\Providers\\BaseFeatureServiceProvider"
+    ],
+    "files": []
+}

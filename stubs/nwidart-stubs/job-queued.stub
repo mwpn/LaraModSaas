@@ -1,0 +1,18 @@
+<?php
+
+namespace $NAMESPACE$;
+
+use App\Jobs\TenantAwareJob;
+
+class $CLASS$ extends TenantAwareJob
+{
+    /**
+     * Create a new job instance.
+     */
+    public function __construct() {}
+
+    /**
+     * Execute the job.
+     */
+    public function handle(): void {}
+}
