@@ -48,6 +48,7 @@ return [
             'account_name' => env('BILLING_TRANSFER_ACCOUNT_NAME', ''),
             'account_number' => env('BILLING_TRANSFER_ACCOUNT_NUMBER', ''),
             'notes' => env('BILLING_TRANSFER_NOTES', ''),
+            'evidence_secret' => env('BILLING_TRANSFER_EVIDENCE_SECRET', ''),
         ],
     ],
 

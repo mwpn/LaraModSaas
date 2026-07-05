@@ -16,6 +16,7 @@ use Illuminate\Http\JsonResponse;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Http;
+use Symfony\Component\HttpFoundation\Response;
 use Illuminate\View\View;
 
 class PublicInvoiceController extends Controller
@@ -227,6 +228,10 @@ class PublicInvoiceController extends Controller
 
     public function receiveBcaEvidence(Request $request): JsonResponse
     {
+        if ($response = $this->authorizeBcaEvidenceRequest($request)) {
+            return $response;
+        }
+
         $result = $this->manualTransferService->reconcileBcaEvidence($request->all());
         $tenant = $result['tenant'] ?? null;
         $invoice = $result['invoice'] ?? null;
@@ -300,6 +305,45 @@ class PublicInvoiceController extends Controller
         abort_if(! is_array($invoice), 404);
 
         return [$tenant, $invoice];
+    }
+
+    protected function authorizeBcaEvidenceRequest(Request $request): ?JsonResponse
+    {
+        $configuredSecret = trim((string) config('services.billing_payment.manual_transfer.evidence_secret', ''));
+
+        if ($configuredSecret === '') {
+            $this->auditLogger->warning('manual_transfer.bca_evidence_blocked', 'Webhook evidence BCA diblokir karena secret belum dikonfigurasi.', [
+                'target_type' => 'billing',
+                'target_id' => 'bca-evidence',
+                'meta' => [
+                    'ip' => $request->ip(),
+                ],
+            ]);
+
+            return response()->json([
+                'status' => 'blocked',
+                'message' => 'Webhook evidence belum dikonfigurasi.',
+            ], Response::HTTP_SERVICE_UNAVAILABLE);
+        }
+
+        $providedSecret = trim((string) $request->header('X-AirCloud-Webhook-Secret', ''));
+
+        if (! hash_equals($configuredSecret, $providedSecret)) {
+            $this->auditLogger->warning('manual_transfer.bca_evidence_unauthorized', 'Webhook evidence BCA ditolak karena secret tidak valid.', [
+                'target_type' => 'billing',
+                'target_id' => 'bca-evidence',
+                'meta' => [
+                    'ip' => $request->ip(),
+                ],
+            ]);
+
+            return response()->json([
+                'status' => 'unauthorized',
+                'message' => 'Webhook evidence tidak sah.',
+            ], Response::HTTP_UNAUTHORIZED);
+        }
+
+        return null;
     }
 
     protected function updateInvoice(Tenant $tenant, string $invoiceNumber, callable $mutator): void

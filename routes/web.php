@@ -22,6 +22,7 @@ foreach (config('tenancy.central_domains', []) as $domain) {
                 ->name('central.login');
 
             Route::post('/login', [CentralAuthController::class, 'store'])
+                ->middleware('throttle:central-login')
                 ->name('central.login.store');
 
             Route::get('/register', [RegistrationController::class, 'create'])
@@ -42,8 +43,10 @@ foreach (config('tenancy.central_domains', []) as $domain) {
         Route::post('/pay/{tenant}/{invoice}/qris/check', [PublicInvoiceController::class, 'checkQrisStatus'])
             ->name('central.public-invoice.check-qris-status');
         Route::post('/pay/{tenant}/{invoice}/manual-transfer/confirm', [PublicInvoiceController::class, 'confirmManualTransfer'])
+            ->middleware('throttle:manual-transfer-check')
             ->name('central.public-invoice.confirm-manual-transfer');
         Route::post('/payments/manual-transfer/evidence/bca', [PublicInvoiceController::class, 'receiveBcaEvidence'])
+            ->middleware('throttle:manual-transfer-evidence')
             ->withoutMiddleware(\Illuminate\Foundation\Http\Middleware\VerifyCsrfToken::class)
             ->name('central.public-invoice.receive-bca-evidence');
 

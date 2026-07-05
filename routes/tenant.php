@@ -25,6 +25,7 @@ Route::middleware('tenant_api_web')->group(function () {
             ->name('login');
 
         Route::post('/login', [TenantAccessController::class, 'store'])
+            ->middleware('throttle:tenant-login')
             ->name('tenant.login.store');
     });
 

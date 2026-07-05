@@ -66,6 +66,32 @@ class AppServiceProvider extends ServiceProvider
             return Limit::perMinute(60)->by($tenantFragment ? 'tenant:' . $tenantFragment : 'tenant:central:' . $host);
         });
 
+        RateLimiter::for('central-login', function (Request $request) {
+            $email = Str::lower((string) $request->input('email', 'guest'));
+
+            return Limit::perMinute(5)->by('central-login:' . $email . '|' . $request->ip());
+        });
+
+        RateLimiter::for('tenant-login', function (Request $request) {
+            $email = Str::lower((string) $request->input('email', 'guest'));
+
+            return Limit::perMinute(5)->by('tenant-login:' . Str::lower($request->getHost()) . '|' . $email . '|' . $request->ip());
+        });
+
+        RateLimiter::for('manual-transfer-check', function (Request $request) {
+            return Limit::perMinute(5)->by(
+                'manual-transfer-check:' . $request->ip()
+                . '|' . (string) $request->route('tenant')
+                . '|' . (string) $request->route('invoice')
+            );
+        });
+
+        RateLimiter::for('manual-transfer-evidence', function (Request $request) {
+            return Limit::perMinute(20)->by(
+                'manual-transfer-evidence:' . $request->ip()
+            );
+        });
+
         Event::listen(TenancyBootstrapped::class, function (TenancyBootstrapped $event): void {
             $tenant = $event->tenancy->tenant;
             $saasType = Str::lower((string) data_get($tenant, 'saas_type', 'universal'));

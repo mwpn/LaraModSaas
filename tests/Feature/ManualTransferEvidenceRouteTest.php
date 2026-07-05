@@ -47,6 +47,8 @@ class ManualTransferEvidenceRouteTest extends TestCase
                 'notes' => 'Transfer exact sesuai nominal unik.',
             ],
         ]);
+
+        config()->set('services.billing_payment.manual_transfer.evidence_secret', 'test-evidence-secret');
     }
 
     public function test_bca_evidence_auto_matches_exact_unique_amount_and_marks_invoice_paid(): void
@@ -82,18 +84,19 @@ class ManualTransferEvidenceRouteTest extends TestCase
             ],
         ]);
 
-        $response = $this->postJson('http://aircloud.biz.id/payments/manual-transfer/evidence/bca', [
-            'message_id' => 'msg-bca-001',
-            'source_adapter' => 'bca_email',
-            'parsed_payload' => [
+        $response = $this->withHeader('X-AirCloud-Webhook-Secret', 'test-evidence-secret')
+            ->postJson('http://aircloud.biz.id/payments/manual-transfer/evidence/bca', [
                 'message_id' => 'msg-bca-001',
-                'account_number' => '1234567890',
-                'credit_amount' => 125321,
-                'sender_name' => 'Budi',
-                'transaction_at' => now()->toIso8601String(),
-            ],
-        ]);
-
+                'source_adapter' => 'bca_email',
+                'parsed_payload' => [
+                    'message_id' => 'msg-bca-001',
+                    'account_number' => '1234567890',
+                    'credit_amount' => 125321,
+                    'sender_name' => 'Budi',
+                    'transaction_at' => now()->toIso8601String(),
+                ],
+            ]);
+ 
         $response->assertOk()
             ->assertJson([
                 'status' => 'matched_auto',
@@ -117,6 +120,22 @@ class ManualTransferEvidenceRouteTest extends TestCase
             'target_type' => 'tenant',
             'target_id' => $tenantId,
         ]);
+    }
+
+    public function test_bca_evidence_requires_valid_webhook_secret(): void
+    {
+        $response = $this->postJson('http://aircloud.biz.id/payments/manual-transfer/evidence/bca', [
+            'message_id' => 'msg-bca-unauthorized',
+            'parsed_payload' => [
+                'account_number' => '1234567890',
+                'credit_amount' => 125321,
+            ],
+        ]);
+
+        $response->assertUnauthorized()
+            ->assertJson([
+                'status' => 'unauthorized',
+            ]);
     }
 
     public function test_duplicate_bca_message_id_is_ignored_after_first_match(): void
@@ -157,13 +176,14 @@ class ManualTransferEvidenceRouteTest extends TestCase
             ],
         ]);
 
-        $response = $this->postJson('http://aircloud.biz.id/payments/manual-transfer/evidence/bca', [
-            'message_id' => 'msg-bca-dup',
-            'parsed_payload' => [
-                'account_number' => '1234567890',
-                'credit_amount' => 99222,
-            ],
-        ]);
+        $response = $this->withHeader('X-AirCloud-Webhook-Secret', 'test-evidence-secret')
+            ->postJson('http://aircloud.biz.id/payments/manual-transfer/evidence/bca', [
+                'message_id' => 'msg-bca-dup',
+                'parsed_payload' => [
+                    'account_number' => '1234567890',
+                    'credit_amount' => 99222,
+                ],
+            ]);
 
         $response->assertOk()
             ->assertJson([
