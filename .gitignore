@@ -2,7 +2,9 @@
 .DS_Store
 .env
 .env.backup
+.env.bak*
 .env.production
+*.bak.*
 .phpactor.json
 .phpunit.result.cache
 /.codex
@@ -22,6 +24,7 @@
 /storage/*.key
 /storage/pail
 /vendor
+/_template_source
 _ide_helper.php
 Homestead.json
 Homestead.yaml
