@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Database\Seeders;
 
+use App\Models\CentralSetting;
 use Illuminate\Database\Seeder;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
@@ -13,7 +14,10 @@ class TenantDatabaseSeeder extends Seeder
 {
     public function run(): void
     {
+        $blueprint = CentralSetting::platformBlueprint((string) (tenant('saas_type') ?? 'universal'));
+
         foreach ([
+            ['name' => 'Owner', 'slug' => 'owner'],
             ['name' => 'Admin', 'slug' => 'admin'],
             ['name' => 'Staff', 'slug' => 'staff'],
         ] as $role) {
@@ -36,8 +40,8 @@ class TenantDatabaseSeeder extends Seeder
             [],
             [
                 'brand_name' => (string) (tenant('name') ?? tenant('id') ?? config('app.name')),
-                'description' => 'Landing page awal tenant siap dikustomisasi oleh owner.',
-                'theme_color' => '#000000',
+                'description' => $blueprint['tenant_description'],
+                'theme_color' => $blueprint['theme_color'],
             ]
         );
     }

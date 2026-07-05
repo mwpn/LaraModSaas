@@ -35,4 +35,20 @@ return [
         ],
     ],
 
+    'interactive_qris' => [
+        'base_url' => env('INTERACTIVE_QRIS_BASE_URL', 'https://qris.interactive.co.id/restapi/qris'),
+        'apikey' => env('INTERACTIVE_QRIS_APIKEY'),
+        'merchant_id' => env('INTERACTIVE_QRIS_MID'),
+        'use_tip' => env('INTERACTIVE_QRIS_USE_TIP', 'no'),
+    ],
+
+    'billing_payment' => [
+        'manual_transfer' => [
+            'bank_name' => env('BILLING_TRANSFER_BANK_NAME', ''),
+            'account_name' => env('BILLING_TRANSFER_ACCOUNT_NAME', ''),
+            'account_number' => env('BILLING_TRANSFER_ACCOUNT_NUMBER', ''),
+            'notes' => env('BILLING_TRANSFER_NOTES', ''),
+        ],
+    ],
+
 ];

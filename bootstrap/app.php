@@ -14,6 +14,9 @@ return Application::configure(basePath: dirname(__DIR__))
     )
     ->withMiddleware(function (Middleware $middleware): void {
         $middleware->group('tenant_api_web', AppServiceProvider::tenantRouteMiddleware());
+        $middleware->alias([
+            'central.permission' => \App\Http\Middleware\EnsureCentralPermission::class,
+        ]);
         $middleware->redirectGuestsTo('/login');
     })
     ->withExceptions(function (Exceptions $exceptions): void {

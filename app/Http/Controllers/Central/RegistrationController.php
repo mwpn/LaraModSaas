@@ -5,104 +5,50 @@ declare(strict_types=1);
 namespace App\Http\Controllers\Central;
 
 use App\Http\Controllers\Controller;
-use App\Models\Tenant;
+use App\Models\CentralSetting;
+use App\Models\DemoRequest;
 use Illuminate\Http\JsonResponse;
-use Illuminate\Support\Facades\DB;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
-use Illuminate\Validation\Rule;
-use Throwable;
+use Illuminate\View\View;
 
 class RegistrationController extends Controller
 {
+    public function create(): View
+    {
+        $platformType = CentralSetting::platformSaasType();
+
+        return view('central.auth.register', [
+            'platformType' => $platformType,
+        ]);
+    }
+
     public function store(Request $request): JsonResponse|RedirectResponse
     {
         $validated = $request->validate([
-            'business_name' => ['required', 'string', 'max:255'],
-            'subdomain' => [
-                'required',
-                'string',
-                'max:63',
-                'regex:/^[a-z0-9]+(?:-[a-z0-9]+)*$/',
-                Rule::unique('domains', 'domain'),
-            ],
-            'saas_type' => [
-                'nullable',
-                'string',
-                Rule::in(['universal', 'resto', 'hotel', 'tirta', 'netbilling']),
-            ],
+            'name' => ['required', 'string', 'max:255'],
+            'email' => ['required', 'email:rfc,dns', 'max:255'],
+            'phone_number' => ['required', 'string', 'min:8', 'max:32'],
         ]);
 
-        $subdomain = strtolower($validated['subdomain']);
-        $saasType = strtolower($validated['saas_type'] ?? 'universal');
-        $centralConnection = DB::connection(
-            config('tenancy.database.central_connection', config('database.default'))
-        );
-        $tenant = new Tenant([
-            'id' => $subdomain,
-            'name' => $validated['business_name'],
-            'saas_type' => $saasType,
+        $saasType = CentralSetting::platformSaasType();
+        $demoRequest = DemoRequest::create([
+            'name' => trim((string) $validated['name']),
+            'email' => strtolower(trim((string) $validated['email'])),
+            'phone_number' => trim((string) $validated['phone_number']),
+            'platform_type' => $saasType,
+            'status' => 'new',
+            'ip_address' => $request->ip(),
+            'user_agent' => $request->userAgent(),
         ]);
-
-        try {
-            $centralConnection->beginTransaction();
-
-            $tenant->save();
-
-            $tenant->domains()->create([
-                'domain' => $subdomain,
-            ]);
-
-            $centralConnection->commit();
-        } catch (Throwable $exception) {
-            if ($centralConnection->transactionLevel() > 0) {
-                $centralConnection->rollBack();
-            }
-
-            $this->compensateFailedProvisioning($tenant);
-            report($exception);
-
-            if ($request->expectsJson()) {
-                return response()->json([
-                    'message' => 'Provisioning tenant gagal. Rollback otomatis sudah dijalankan.',
-                ], 500);
-            }
-
-            return back()
-                ->withInput()
-                ->withErrors([
-                    'subdomain' => 'Provisioning tenant gagal. Silakan coba lagi.',
-                ]);
-        }
-
-        $tenantUrl = sprintf('http://%s.%s/login', $subdomain, config('tenancy.central_domains.0'));
 
         if ($request->expectsJson()) {
             return response()->json([
-                'message' => 'Tenant berhasil dibuat.',
-                'tenant_id' => $tenant->id,
-                'tenant_url' => $tenantUrl,
+                'message' => 'Request demo berhasil dikirim.',
+                'request_id' => $demoRequest->getKey(),
             ], 201);
         }
 
-        return redirect()->away($tenantUrl);
-    }
-
-    protected function compensateFailedProvisioning(Tenant $tenant): void
-    {
-        if (tenancy()->initialized) {
-            tenancy()->end();
-        }
-
-        $databaseName = $tenant->database()->getName();
-        $databaseManager = $tenant->database()->manager();
-
-        if (filled($databaseName) && $databaseManager->databaseExists($databaseName)) {
-            $databaseManager->deleteDatabase($tenant);
-        }
-
-        Tenant::query()
-            ->whereKey($tenant->getKey())
-            ->delete();
+        return back()->with('status', 'Request demo berhasil dikirim. Tim kami akan menghubungi Anda secepatnya.');
     }
 }

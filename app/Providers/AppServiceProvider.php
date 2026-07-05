@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 namespace App\Providers;
 
+use App\Http\Middleware\EnsureTenantIsActive;
+use App\Models\CentralSetting;
 use Illuminate\Cache\RateLimiting\Limit;
 use Illuminate\Http\Request;
 use Illuminate\Support\Fluent;
@@ -25,6 +27,7 @@ class AppServiceProvider extends ServiceProvider
             'web',
             InitializeTenancyBySubdomain::class,
             PreventAccessFromCentralDomains::class,
+            EnsureTenantIsActive::class,
             'throttle:tenant',
         ];
     }
@@ -66,13 +69,7 @@ class AppServiceProvider extends ServiceProvider
         Event::listen(TenancyBootstrapped::class, function (TenancyBootstrapped $event): void {
             $tenant = $event->tenancy->tenant;
             $saasType = Str::lower((string) data_get($tenant, 'saas_type', 'universal'));
-
-            $typeToEnabledModules = [
-                'resto' => ['RestoPOS'],
-                'hotel' => ['HospitalityHub'],
-                'tirta' => ['TirtaBilling'],
-                'netbilling' => ['NetBilling'],
-            ];
+            $blueprint = CentralSetting::platformBlueprint($saasType);
 
             $modules = app('modules')->all();
             $moduleNames = array_values(array_map(
@@ -80,13 +77,14 @@ class AppServiceProvider extends ServiceProvider
                 $modules
             ));
 
-            $alwaysEnabled = ['BaseFeature'];
-            $enabledForType = $typeToEnabledModules[$saasType] ?? [];
-            $enabled = array_values(array_unique(array_merge($alwaysEnabled, $enabledForType)));
+            $enabled = array_values(array_unique(array_merge(
+                ['BaseFeature'],
+                CentralSetting::runtimeEnabledModules($saasType)
+            )));
 
             $statuses = [];
             foreach ($moduleNames as $moduleName) {
-                $statuses[$moduleName] = $saasType === 'universal' || in_array($moduleName, $enabled, true);
+                $statuses[$moduleName] = in_array($moduleName, $enabled, true);
             }
 
             config(['modules.statuses' => $statuses]);
@@ -104,8 +102,8 @@ class AppServiceProvider extends ServiceProvider
 
             View::share('tenantSetting', $tenantSetting ?: new Fluent([
                 'brand_name' => data_get($tenant, 'name') ?? data_get($tenant, 'id'),
-                'theme_color' => '#000000',
-                'description' => null,
+                'theme_color' => $blueprint['theme_color'],
+                'description' => $blueprint['tenant_description'],
             ]));
         });
     }

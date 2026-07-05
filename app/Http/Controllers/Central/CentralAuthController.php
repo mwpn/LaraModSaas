@@ -5,6 +5,8 @@ declare(strict_types=1);
 namespace App\Http\Controllers\Central;
 
 use App\Http\Controllers\Controller;
+use App\Models\CentralSetting;
+use App\Models\User;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
@@ -15,7 +17,11 @@ class CentralAuthController extends Controller
 {
     public function create(): View
     {
-        return view('central.auth.login');
+        $platformType = CentralSetting::platformSaasType();
+
+        return view('central.auth.login', [
+            'platformType' => $platformType,
+        ]);
     }
 
     /**
@@ -36,6 +42,20 @@ class CentralAuthController extends Controller
             ]);
         }
 
+        /** @var User|null $user */
+        $user = Auth::guard('central')->user();
+
+        if (! $user?->isActiveUser()) {
+            Auth::guard('central')->logout();
+
+            $request->session()->invalidate();
+            $request->session()->regenerateToken();
+
+            throw ValidationException::withMessages([
+                'email' => 'Akun superadmin ini sedang dinonaktifkan.',
+            ]);
+        }
+
         $request->session()->regenerate();
 
         return redirect()->to('/super-admin/tenants');
@@ -51,4 +71,3 @@ class CentralAuthController extends Controller
         return redirect()->to('/');
     }
 }
-
