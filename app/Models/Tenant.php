@@ -4,7 +4,13 @@ declare(strict_types=1);
 
 namespace App\Models;
 
+use App\Models\Central\TenantModuleState;
+use App\Models\Central\TenantSubscription;
+use App\Services\Central\TenantSubscriptionInvoiceService;
+use App\Services\Central\TenantSubscriptionService;
 use Carbon\CarbonImmutable;
+use Illuminate\Database\Eloquent\Relations\HasMany;
+use Illuminate\Database\Eloquent\Relations\HasOne;
 use Stancl\Tenancy\Contracts\TenantWithDatabase;
 use Stancl\Tenancy\Database\Concerns\HasDatabase;
 use Stancl\Tenancy\Database\Concerns\HasDomains;
@@ -43,6 +49,16 @@ class Tenant extends BaseTenant implements TenantWithDatabase
         ];
     }
 
+    public function subscription(): HasOne
+    {
+        return $this->hasOne(TenantSubscription::class, 'tenant_id', 'id');
+    }
+
+    public function moduleStates(): HasMany
+    {
+        return $this->hasMany(TenantModuleState::class, 'tenant_id', 'id');
+    }
+
     public function normalizedStatus(): string
     {
         $status = strtolower((string) data_get($this, 'status', 'active'));
@@ -74,6 +90,16 @@ class Tenant extends BaseTenant implements TenantWithDatabase
 
     public function packageCode(): ?string
     {
+        $subscription = $this->subscriptionRecord();
+
+        if ($subscription) {
+            $packageCode = trim((string) ($subscription->package_code_snapshot ?: $subscription->package?->package_code));
+
+            if ($packageCode !== '') {
+                return $packageCode;
+            }
+        }
+
         $packageCode = trim((string) data_get($this, 'package_code', ''));
 
         return $packageCode !== '' ? $packageCode : null;
@@ -85,9 +111,10 @@ class Tenant extends BaseTenant implements TenantWithDatabase
             return 'suspended';
         }
 
-        $status = strtolower((string) data_get($this, 'subscription_status', 'active'));
+        $subscription = $this->subscriptionRecord();
+        $status = strtolower((string) ($subscription?->status ?: data_get($this, 'subscription_status', 'active')));
 
-        if (! in_array($status, ['trial', 'active', 'grace', 'expired'], true)) {
+        if (! in_array($status, ['trial', 'active', 'grace', 'expired', 'suspended'], true)) {
             $status = 'active';
         }
 
@@ -106,22 +133,41 @@ class Tenant extends BaseTenant implements TenantWithDatabase
 
     public function subscriptionStartsAt(): ?CarbonImmutable
     {
+        $subscription = $this->subscriptionRecord();
+
+        if ($subscription?->starts_at) {
+            return CarbonImmutable::instance($subscription->starts_at);
+        }
+
         return $this->parseTenantTimestamp(data_get($this, 'subscription_starts_at'));
     }
 
     public function subscriptionExpiresAt(): ?CarbonImmutable
     {
+        $subscription = $this->subscriptionRecord();
+
+        if ($subscription?->expires_at) {
+            return CarbonImmutable::instance($subscription->expires_at);
+        }
+
         return $this->parseTenantTimestamp(data_get($this, 'subscription_expires_at'));
     }
 
     public function subscriptionGraceUntil(): ?CarbonImmutable
     {
+        $subscription = $this->subscriptionRecord();
+
+        if ($subscription?->grace_until) {
+            return CarbonImmutable::instance($subscription->grace_until);
+        }
+
         return $this->parseTenantTimestamp(data_get($this, 'subscription_grace_until'));
     }
 
     public function billingUsageSnapshot(): array
     {
-        $usage = data_get($this, 'billing_usage', []);
+        $subscription = $this->subscriptionRecord();
+        $usage = $subscription?->billing_usage_snapshot ?? data_get($this, 'billing_usage', []);
 
         return [
             'customers' => max((int) data_get($usage, 'customers', 0), 0),
@@ -133,10 +179,82 @@ class Tenant extends BaseTenant implements TenantWithDatabase
 
     public function invoiceSequence(): int
     {
-        return max((int) data_get($this, 'invoice_sequence', 0), 0);
+        $invoiceService = app(TenantSubscriptionInvoiceService::class);
+        $aggregate = $invoiceService->aggregateForTenant($this);
+        $derivedSequence = collect($this->billingInvoices())
+            ->map(function (array $invoice): int {
+                $invoiceNumber = (string) ($invoice['invoice_number'] ?? '');
+
+                if (preg_match('/-(\d{1,10})$/', $invoiceNumber, $matches) === 1) {
+                    return max((int) ($matches[1] ?? 0), 0);
+                }
+
+                return 0;
+            })
+            ->max() ?? 0;
+
+        return max(
+            (int) ($aggregate['max_sequence'] ?? 0),
+            $derivedSequence,
+            (int) data_get($this, 'invoice_sequence', 0),
+        );
+    }
+
+    public function firstInvoiceIssuedAt(): ?CarbonImmutable
+    {
+        $aggregate = app(TenantSubscriptionInvoiceService::class)->aggregateForTenant($this);
+
+        if ($aggregate['first_issued_at'] instanceof CarbonImmutable) {
+            return $aggregate['first_issued_at'];
+        }
+
+        $legacyTimestamp = $this->parseTenantTimestamp(data_get($this, 'first_invoice_issued_at'));
+
+        if ($legacyTimestamp instanceof CarbonImmutable) {
+            return $legacyTimestamp;
+        }
+
+        return collect($this->billingInvoices())
+            ->map(fn (array $invoice): ?CarbonImmutable => $invoice['issued_at'] ?? $invoice['created_at'] ?? null)
+            ->filter(fn ($value): bool => $value instanceof CarbonImmutable)
+            ->sortBy(fn (CarbonImmutable $value): int => $value->getTimestamp())
+            ->first();
+    }
+
+    public function lastInvoiceGeneratedAt(): ?CarbonImmutable
+    {
+        $aggregate = app(TenantSubscriptionInvoiceService::class)->aggregateForTenant($this);
+
+        if ($aggregate['last_generated_at'] instanceof CarbonImmutable) {
+            return $aggregate['last_generated_at'];
+        }
+
+        return $this->parseTenantTimestamp(data_get($this, 'last_invoice_generated_at'));
+    }
+
+    public function lastInvoiceStatusUpdatedAt(): ?CarbonImmutable
+    {
+        $aggregate = app(TenantSubscriptionInvoiceService::class)->aggregateForTenant($this);
+
+        if ($aggregate['last_status_updated_at'] instanceof CarbonImmutable) {
+            return $aggregate['last_status_updated_at'];
+        }
+
+        return $this->parseTenantTimestamp(data_get($this, 'last_invoice_status_updated_at'));
     }
 
     public function billingInvoices(): array
+    {
+        $relationalInvoices = app(TenantSubscriptionInvoiceService::class)->invoicesForTenant($this);
+
+        if ($relationalInvoices !== []) {
+            return $relationalInvoices;
+        }
+
+        return $this->legacyBillingInvoices();
+    }
+
+    public function legacyBillingInvoices(): array
     {
         $invoices = data_get($this, 'billing_invoices', []);
 
@@ -197,7 +315,9 @@ class Tenant extends BaseTenant implements TenantWithDatabase
 
     public function billingGraceDays(): int
     {
-        return max((int) data_get($this, 'billing_grace_days', 3), 0);
+        $subscription = $this->subscriptionRecord();
+
+        return max((int) ($subscription?->billing_grace_days ?? data_get($this, 'billing_grace_days', 3)), 0);
     }
 
     public function oldestCollectibleInvoice(): ?array
@@ -286,6 +406,10 @@ class Tenant extends BaseTenant implements TenantWithDatabase
 
     protected function parseTenantTimestamp(mixed $value): ?CarbonImmutable
     {
+        if ($value instanceof \DateTimeInterface) {
+            return CarbonImmutable::instance($value);
+        }
+
         if (! is_string($value) || trim($value) === '') {
             return null;
         }
@@ -343,5 +467,22 @@ class Tenant extends BaseTenant implements TenantWithDatabase
                 'raw_status' => (string) data_get($payment, 'qris.raw_status', ''),
             ],
         ];
+    }
+
+    protected function subscriptionRecord(): ?TenantSubscription
+    {
+        if ($this->relationLoaded('subscription')) {
+            $loaded = $this->getRelation('subscription');
+
+            return $loaded instanceof TenantSubscription ? $loaded : null;
+        }
+
+        $subscription = app(TenantSubscriptionService::class)->findForTenant($this);
+
+        if ($subscription) {
+            $this->setRelation('subscription', $subscription);
+        }
+
+        return $subscription;
     }
 }

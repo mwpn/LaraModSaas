@@ -7,8 +7,23 @@
     @php
         $currentUser = auth('central')->user();
         $canManageTenants = $currentUser?->canAccessCentral('tenants.manage') ?? false;
+        $canManageBilling = $currentUser?->canAccessCentral('billing.manage') ?? false;
         $canViewUsers = $currentUser?->canAccessCentral('users.view') ?? false;
         $canViewSettings = $currentUser?->canAccessCentral('settings.view') ?? false;
+        $bulkRepairInvoiceHealthFilter = (string) ($filters['invoice_health'] ?? '');
+        $canBulkRepairInvoiceHealth = $canManageBilling && in_array($bulkRepairInvoiceHealthFilter, ['legacy_only', 'relational_shadow', 'mismatch'], true) && $tenants->isNotEmpty();
+        $bulkRepairLabel = match ($bulkRepairInvoiceHealthFilter) {
+            'legacy_only' => 'Bulk Repair Legacy',
+            'relational_shadow' => 'Bulk Cleanup Shadow',
+            'mismatch' => 'Bulk Force Sync',
+            default => 'Bulk Repair',
+        };
+        $bulkRepairMessage = match ($bulkRepairInvoiceHealthFilter) {
+            'legacy_only' => 'Jalankan bulk repair untuk semua tenant legacy_only pada hasil filter saat ini? Invoice legacy akan dibackfill ke relasional lalu shadow yang aman dibersihkan.',
+            'relational_shadow' => 'Jalankan bulk cleanup shadow untuk semua tenant relational_shadow pada hasil filter saat ini? Shadow legacy yang aman akan dibersihkan.',
+            'mismatch' => 'Jalankan bulk force repair mismatch untuk semua tenant mismatch pada hasil filter saat ini? Shadow legacy akan direbuild dari source of truth relasional.',
+            default => 'Jalankan bulk repair invoice untuk semua tenant pada hasil filter saat ini?',
+        };
     @endphp
 
     <div class="page-grid">
@@ -154,11 +169,40 @@
                                 </option>
                             @endforeach
                         </select>
+                        <select name="invoice_health" style="flex: 0 1 220px;">
+                            <option value="">Semua invoice health</option>
+                            @foreach ($availableInvoiceHealthFilters as $invoiceHealthFilter)
+                                <option value="{{ $invoiceHealthFilter }}" @selected($filters['invoice_health'] === $invoiceHealthFilter)>
+                                    {{ ucfirst(str_replace('_', ' ', $invoiceHealthFilter)) }}
+                                </option>
+                            @endforeach
+                        </select>
                         <button class="central-btn-secondary" type="submit">Filter</button>
-                        @if ($filters['q'] !== '' || $filters['saas_type'] !== '')
+                        @if ($filters['q'] !== '' || $filters['saas_type'] !== '' || $filters['invoice_health'] !== '')
                             <a class="central-btn-secondary" href="{{ route('central.super-admin.tenants.index') }}">Reset</a>
                         @endif
                     </form>
+
+                    @if ($canBulkRepairInvoiceHealth)
+                        <form method="POST" action="{{ route('central.super-admin.tenants.repair-bulk') }}" class="inline-actions">
+                            @csrf
+                            <input type="hidden" name="q" value="{{ $filters['q'] }}">
+                            <input type="hidden" name="saas_type" value="{{ $filters['saas_type'] }}">
+                            <input type="hidden" name="invoice_health" value="{{ $filters['invoice_health'] }}">
+                            <button
+                                class="central-btn"
+                                type="submit"
+                                data-confirm
+                                data-confirm-variant="{{ $bulkRepairInvoiceHealthFilter === 'mismatch' ? 'danger' : 'default' }}"
+                                data-confirm-title="{{ $bulkRepairLabel }}"
+                                data-confirm-message="{{ $bulkRepairMessage }}"
+                                data-confirm-confirm-label="Ya, gas bulk"
+                            >
+                                {{ $bulkRepairLabel }}
+                            </button>
+                            <span class="status-muted">{{ $tenants->count() }} tenant pada hasil filter sekarang</span>
+                        </form>
+                    @endif
 
                     @if ($canManageTenants)
                         <form method="POST" action="{{ route('central.super-admin.tenants.sync-platform') }}" class="form-stack">
@@ -205,9 +249,10 @@
                         <tbody>
                             @forelse ($tenants as $tenant)
                                 @php
-                                    $tenantPackageCode = $tenant->packageCode() ?: $defaultPackageCode;
-                                    $tenantPackage = $packageCatalog[$tenantPackageCode] ?? null;
+                                    $tenantPackageMeta = $tenantPackageLabels[$tenant->id] ?? ['code' => ($tenant->packageCode() ?: $defaultPackageCode), 'label' => ucfirst((string) ($tenant->packageCode() ?: $defaultPackageCode))];
+                                    $tenantPackageCode = (string) ($tenantPackageMeta['code'] ?? ($tenant->packageCode() ?: $defaultPackageCode));
                                     $billingSummary = $tenantBillingSummaries[$tenant->id] ?? null;
+                                    $moduleSummary = $tenantModuleSummaries[$tenant->id] ?? ['counts' => ['enabled' => 0, 'disabled' => 0, 'blocked' => 0]];
                                     $subscriptionStatus = (string) data_get($billingSummary, 'status', 'active');
                                     $subscriptionLabel = match ($subscriptionStatus) {
                                         'trial' => 'Trial',
@@ -243,6 +288,16 @@
                                         'manual_suspend', 'invoice_overdue', 'subscription_expired' => 'status-muted',
                                         default => 'status-active',
                                     };
+                                    $invoiceHealth = (array) data_get($billingSummary, 'invoice_health', []);
+                                    $invoiceHealthStatus = (string) data_get($invoiceHealth, 'status', 'empty');
+                                    $invoiceHealthClass = match ($invoiceHealthStatus) {
+                                        'relational_only' => 'status-active',
+                                        'relational_shadow', 'legacy_only' => 'status-pending',
+                                        'mismatch', 'tables_missing' => 'status-muted',
+                                        default => 'status-muted',
+                                    };
+                                    $canRepairInvoiceHealth = in_array($invoiceHealthStatus, ['legacy_only', 'relational_shadow'], true);
+                                    $canForceRepairInvoiceMismatch = $invoiceHealthStatus === 'mismatch';
                                 @endphp
                                 <tr>
                                     <td>
@@ -251,13 +306,15 @@
                                     </td>
                                     <td>
                                         <strong>{{ $tenant->name }}</strong><br>
-                                        <span class="muted">{{ $tenantPackage['label'] ?? ucfirst($tenantPackageCode) }} Package</span>
+                                        <span class="muted">{{ $tenantPackageMeta['label'] }} Package</span>
                                         @if ($billingSummary)
                                             <br><span class="muted">Invoice: Rp{{ number_format((int) data_get($billingSummary, 'invoice.invoice_total', 0), 0, ',', '.') }}</span>
                                             @if ($latestInvoice)
                                                 <br><span class="{{ $latestInvoiceClass }}">{{ $latestInvoiceLabel }} · {{ $latestInvoice['invoice_number'] }}</span>
                                             @endif
+                                            <br><span class="{{ $invoiceHealthClass }}">Invoice Health: {{ data_get($invoiceHealth, 'label', 'Kosong') }}</span>
                                         @endif
+                                        <br><span class="muted">Modules: {{ data_get($moduleSummary, 'counts.enabled', 0) }} on / {{ data_get($moduleSummary, 'counts.blocked', 0) }} blocked</span>
                                     </td>
                                     <td>
                                         <div class="form-stack" style="gap: 8px;">
@@ -273,6 +330,17 @@
                                                 {{ $accessLabel }}
                                             </span>
                                             <span class="{{ $subscriptionClass }}">{{ $subscriptionLabel }}</span>
+                                            <span class="muted">
+                                                Rel {{ (int) data_get($invoiceHealth, 'relational_count', 0) }} / Legacy {{ (int) data_get($invoiceHealth, 'legacy_count', 0) }}
+                                            </span>
+                                            @if (collect(data_get($invoiceHealth, 'legacy_meta_keys', []))->isNotEmpty())
+                                                <span class="muted">Meta: {{ collect(data_get($invoiceHealth, 'legacy_meta_keys', []))->implode(', ') }}</span>
+                                            @endif
+                                            @if ($invoiceHealthStatus === 'mismatch')
+                                                <span class="status-muted">
+                                                    Mismatch: {{ collect(data_get($invoiceHealth, 'mismatch_invoice_numbers', []))->take(2)->implode(', ') ?: 'perlu review' }}
+                                                </span>
+                                            @endif
                                             @if (data_get($accessBlock, 'grace_ends_at'))
                                                 <span class="muted">Grace sampai {{ data_get($accessBlock, 'grace_ends_at')->format('d M Y') }}</span>
                                             @endif
@@ -282,6 +350,42 @@
                                         <div class="form-stack" style="gap: 10px;">
                                             <div class="inline-actions">
                                                 <a class="central-btn-secondary" href="{{ route('central.super-admin.tenants.show', $tenant->id) }}">Detail</a>
+
+                                                @if ($canManageBilling && $canRepairInvoiceHealth)
+                                                    <form method="POST" action="{{ route('central.super-admin.tenants.repair-invoices', $tenant->id) }}">
+                                                        @csrf
+                                                        <input type="hidden" name="mode" value="auto">
+                                                        <input type="hidden" name="cleanup_shadow" value="1">
+                                                        <button
+                                                            class="central-btn-secondary"
+                                                            type="submit"
+                                                            data-confirm
+                                                            data-confirm-title="Repair Invoice Health"
+                                                            data-confirm-message="Jalankan repair invoice untuk tenant {{ $tenant->id }}? Status sekarang: {{ data_get($invoiceHealth, 'label', 'Kosong') }}."
+                                                            data-confirm-confirm-label="Ya, repair"
+                                                        >
+                                                            Repair
+                                                        </button>
+                                                    </form>
+                                                @endif
+
+                                                @if ($canManageBilling && $canForceRepairInvoiceMismatch)
+                                                    <form method="POST" action="{{ route('central.super-admin.tenants.repair-invoices', $tenant->id) }}">
+                                                        @csrf
+                                                        <input type="hidden" name="mode" value="relational_to_legacy">
+                                                        <button
+                                                            class="central-btn-secondary"
+                                                            type="submit"
+                                                            data-confirm
+                                                            data-confirm-variant="danger"
+                                                            data-confirm-title="Force Repair Mismatch"
+                                                            data-confirm-message="Paksa rebuild shadow legacy tenant {{ $tenant->id }} dari data relasional saat ini? Gunakan hanya untuk kasus invoice health mismatch."
+                                                            data-confirm-confirm-label="Ya, paksa"
+                                                        >
+                                                            Force Sync
+                                                        </button>
+                                                    </form>
+                                                @endif
 
                                                 @if ($canManageTenants)
                                                     @if ($tenant->isSuspended())
@@ -436,6 +540,41 @@
                         <div class="mini-row">
                             <span>Subscription Expiring</span>
                             <strong>{{ $billingDashboard['expiring_soon_count'] }}</strong>
+                        </div>
+                    </div>
+                </section>
+
+                <section class="dashboard-card">
+                    <div class="card-head">
+                        <div>
+                            <h3 class="card-title">Invoice Health</h3>
+                        </div>
+                    </div>
+
+                    <div class="mini-list">
+                        <div class="mini-row">
+                            <span>Relasional Only</span>
+                            <strong class="status-active">{{ data_get($billingDashboard, 'invoice_health.relational_only', 0) }}</strong>
+                        </div>
+                        <div class="mini-row">
+                            <span>Relasional + Shadow</span>
+                            <strong class="status-pending">{{ data_get($billingDashboard, 'invoice_health.relational_shadow', 0) }}</strong>
+                        </div>
+                        <div class="mini-row">
+                            <span>Legacy Only</span>
+                            <strong class="status-pending">{{ data_get($billingDashboard, 'invoice_health.legacy_only', 0) }}</strong>
+                        </div>
+                        <div class="mini-row">
+                            <span>Mismatch</span>
+                            <strong class="status-muted">{{ data_get($billingDashboard, 'invoice_health.mismatch', 0) }}</strong>
+                        </div>
+                        <div class="mini-row">
+                            <span>Kosong</span>
+                            <strong>{{ data_get($billingDashboard, 'invoice_health.empty', 0) }}</strong>
+                        </div>
+                        <div class="mini-row">
+                            <span>Schema Belum Ada</span>
+                            <strong>{{ data_get($billingDashboard, 'invoice_health.tables_missing', 0) }}</strong>
                         </div>
                     </div>
                 </section>

@@ -14,6 +14,7 @@ class ManualTransferService
 {
     public function __construct(
         protected CentralAuditLogger $auditLogger,
+        protected TenantSubscriptionInvoiceService $tenantSubscriptionInvoiceService,
     ) {
     }
 
@@ -229,12 +230,10 @@ class ManualTransferService
     ): array {
         $messageId = trim((string) data_get($payload, 'message_id', data_get($payload, 'parsed_payload.message_id', '')));
         $parsedPayload = (array) data_get($payload, 'parsed_payload', []);
-        $billingInvoices = collect($tenant->billingInvoices())
-            ->map(function (array $candidate) use ($invoice, $payload, $transferConfig, $matchedAt, $messageId, $parsedPayload): array {
-                if (($candidate['invoice_number'] ?? null) !== ($invoice['invoice_number'] ?? null)) {
-                    return $candidate;
-                }
-
+        $updatedInvoice = $this->tenantSubscriptionInvoiceService->mutateInvoice(
+            $tenant,
+            (string) ($invoice['invoice_number'] ?? ''),
+            function (array $candidate) use ($payload, $transferConfig, $matchedAt, $messageId, $parsedPayload): array {
                 $manualTransfer = array_merge(
                     [
                         'bank_name' => (string) ($transferConfig['bank_name'] ?? ''),
@@ -275,17 +274,10 @@ class ManualTransferService
                 ];
 
                 return $candidate;
-            })
-            ->values()
-            ->all();
+            }
+        );
 
-        $tenant->forceFill([
-            'billing_invoices' => $billingInvoices,
-            'last_invoice_status_updated_at' => $matchedAt->toIso8601String(),
-        ])->save();
-
-        return collect($tenant->fresh()->billingInvoices())
-            ->firstWhere('invoice_number', (string) ($invoice['invoice_number'] ?? '')) ?? $invoice;
+        return is_array($updatedInvoice) ? $updatedInvoice : $invoice;
     }
 
     protected function messageIdAlreadyProcessed(string $messageId): bool

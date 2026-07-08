@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 namespace App\Models;
 
+use App\Services\Central\PlatformModuleCatalogService;
+use App\Services\Central\SubscriptionPackageCatalogService;
 use Illuminate\Contracts\Encryption\DecryptException;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Support\Collection;
@@ -48,6 +50,17 @@ class CentralSetting extends Model
     }
 
     public static function moduleCatalog(): array
+    {
+        $catalog = static::moduleCatalogService()->catalogAsLegacy();
+
+        if ($catalog !== []) {
+            return $catalog;
+        }
+
+        return static::legacyModuleCatalog();
+    }
+
+    public static function legacyModuleCatalog(): array
     {
         return [
             'BaseFeature' => [
@@ -287,7 +300,7 @@ class CentralSetting extends Model
         ];
     }
 
-    public static function packageCatalog(?string $platformType = null): array
+    public static function legacyPackageCatalog(?string $platformType = null): array
     {
         $platformType ??= static::platformSaasType();
 
@@ -304,21 +317,10 @@ class CentralSetting extends Model
         return static::normalizePackageCatalog($decoded, $platformType);
     }
 
-    public static function setPackageCatalog(array $packages, ?string $platformType = null): void
+    public static function legacyDefaultPackageCode(?string $platformType = null): string
     {
         $platformType ??= static::platformSaasType();
-        $normalized = static::normalizePackageCatalog($packages, $platformType);
-
-        static::query()->updateOrCreate(
-            ['key' => self::PACKAGE_CATALOG_KEY],
-            ['value' => json_encode($normalized, JSON_THROW_ON_ERROR)],
-        );
-    }
-
-    public static function defaultPackageCode(?string $platformType = null): string
-    {
-        $platformType ??= static::platformSaasType();
-        $packages = static::packageCatalog($platformType);
+        $packages = static::legacyPackageCatalog($platformType);
 
         $stored = static::query()
             ->where('key', self::DEFAULT_PACKAGE_CODE_KEY)
@@ -334,6 +336,43 @@ class CentralSetting extends Model
         return (string) ($enabledFallback['code'] ?? array_key_first($packages) ?? 'starter');
     }
 
+    public static function packageCatalog(?string $platformType = null): array
+    {
+        $platformType ??= static::platformSaasType();
+        $relationalCatalog = static::packageCatalogService()->catalogAsLegacy($platformType);
+
+        if ($relationalCatalog !== []) {
+            return static::normalizePackageCatalog($relationalCatalog, $platformType);
+        }
+
+        return static::legacyPackageCatalog($platformType);
+    }
+
+    public static function setPackageCatalog(array $packages, ?string $platformType = null): void
+    {
+        $platformType ??= static::platformSaasType();
+        $normalized = static::normalizePackageCatalog($packages, $platformType);
+
+        static::query()->updateOrCreate(
+            ['key' => self::PACKAGE_CATALOG_KEY],
+            ['value' => json_encode($normalized, JSON_THROW_ON_ERROR)],
+        );
+
+        static::packageCatalogService()->replaceCatalogFromLegacy($normalized, $platformType);
+    }
+
+    public static function defaultPackageCode(?string $platformType = null): string
+    {
+        $platformType ??= static::platformSaasType();
+        $relationalDefault = static::packageCatalogService()->defaultPackageCode($platformType);
+
+        if (is_string($relationalDefault) && $relationalDefault !== '') {
+            return $relationalDefault;
+        }
+
+        return static::legacyDefaultPackageCode($platformType);
+    }
+
     public static function setDefaultPackageCode(string $packageCode, ?string $platformType = null): void
     {
         $platformType ??= static::platformSaasType();
@@ -346,6 +385,8 @@ class CentralSetting extends Model
             ['key' => self::DEFAULT_PACKAGE_CODE_KEY],
             ['value' => $normalizedCode],
         );
+
+        static::packageCatalogService()->setDefaultPackageCode($normalizedCode, $platformType);
     }
 
     public static function findPackage(string $packageCode, ?string $platformType = null): ?array
@@ -363,6 +404,11 @@ class CentralSetting extends Model
     public static function activeModules(?string $platformType = null): array
     {
         $platformType ??= static::platformSaasType();
+        $relationalModules = static::moduleCatalogService()->activeModuleNames($platformType);
+
+        if ($relationalModules !== []) {
+            return $relationalModules;
+        }
 
         $stored = static::query()
             ->where('key', self::ACTIVE_MODULES_KEY)
@@ -417,6 +463,7 @@ class CentralSetting extends Model
     public static function setActiveModules(array $modules): void
     {
         $catalogKeys = array_keys(static::moduleCatalog());
+        $platformType = static::platformSaasType();
 
         $normalized = collect($modules)
             ->filter(fn ($module) => is_string($module) && in_array($module, $catalogKeys, true))
@@ -429,11 +476,19 @@ class CentralSetting extends Model
             ['key' => self::ACTIVE_MODULES_KEY],
             ['value' => json_encode($normalized, JSON_THROW_ON_ERROR)],
         );
+
+        static::moduleCatalogService()->setActiveModulesForPlatform($normalized, $platformType);
     }
 
     public static function syncActiveModulesForPlatform(string $platformType): void
     {
-        static::setActiveModules(static::platformBlueprint($platformType)['modules']);
+        $modules = static::platformBlueprint($platformType)['modules'];
+        static::query()->updateOrCreate(
+            ['key' => self::ACTIVE_MODULES_KEY],
+            ['value' => json_encode($modules, JSON_THROW_ON_ERROR)],
+        );
+
+        static::moduleCatalogService()->setActiveModulesForPlatform($modules, $platformType);
     }
 
     public static function settingValue(string $key, mixed $default = null): mixed
@@ -1067,6 +1122,16 @@ class CentralSetting extends Model
             'monthly_total' => $monthlyTotal,
             'invoice_total' => $monthlyTotal + ($includeSetupFee ? $setupFee : 0),
         ];
+    }
+
+    protected static function moduleCatalogService(): PlatformModuleCatalogService
+    {
+        return app(PlatformModuleCatalogService::class);
+    }
+
+    protected static function packageCatalogService(): SubscriptionPackageCatalogService
+    {
+        return app(SubscriptionPackageCatalogService::class);
     }
 
     protected static function normalizePackageCatalog(array $packages, ?string $platformType = null): array

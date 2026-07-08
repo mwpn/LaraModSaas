@@ -4,12 +4,16 @@ declare(strict_types=1);
 
 namespace App\Http\Controllers\Tenant;
 
+use App\Http\Controllers\Tenant\Concerns\InteractsWithTirtaAreaScope;
 use App\Http\Controllers\Controller;
+use App\Models\JobTitle;
 use App\Models\Role;
+use App\Models\Tirta\ServiceArea;
 use App\Models\User;
 use Illuminate\Database\Eloquent\Collection as EloquentCollection;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
+use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\Str;
@@ -20,32 +24,56 @@ use Modules\BaseFeature\Models\TenantSetting;
 
 class TenantUserController extends Controller
 {
+    use InteractsWithTirtaAreaScope;
+
     public function index(): View
     {
         $manager = $this->manager();
         $schemaReady = $this->schemaReady();
+        $serviceAreaSchemaReady = $this->serviceAreaSchemaReady();
+        $jobTitleSchemaReady = $this->jobTitleSchemaReady();
+        $jobTitleCatalogEnabled = $this->jobTitleCatalogEnabled();
+        $jobTitleCatalogOptions = $jobTitleCatalogEnabled ? $this->jobTitleCatalogOptions() : collect();
 
         if ($schemaReady) {
             $this->ensureRoleRecords();
         }
 
         $roles = $schemaReady ? $this->roles() : new EloquentCollection();
+        $manageableRoles = $schemaReady ? $this->manageableRoles($manager) : new EloquentCollection();
+        $serviceAreas = $serviceAreaSchemaReady ? $this->serviceAreas() : new EloquentCollection();
+        $serviceAreaOptions = $serviceAreaSchemaReady ? $this->serviceAreaOptions($serviceAreas) : collect();
         $users = $schemaReady
-            ? User::query()->with('role')->orderByDesc('is_active')->orderBy('name')->get()
+            ? User::query()
+                ->with(['role', 'serviceArea.parent'])
+                ->when($this->tirtaAreaIsRestricted(), fn ($query) => $query->whereIn('service_area_id', $this->tirtaAllowedAreaIds()->all()))
+                ->orderByDesc('is_active')
+                ->orderBy('name')
+                ->get()
             : new EloquentCollection();
 
         return view('basefeature::users', [
             'setting' => $this->tenantSetting(),
             'manager' => $manager,
             'roles' => $roles,
+            'manageableRoles' => $manageableRoles,
+            'serviceAreas' => $serviceAreas,
+            'serviceAreaOptions' => $serviceAreaOptions,
             'users' => $users,
             'schemaReady' => $schemaReady,
+            'serviceAreaSchemaReady' => $serviceAreaSchemaReady,
+            'jobTitleSchemaReady' => $jobTitleSchemaReady,
+            'jobTitleCatalogEnabled' => $jobTitleCatalogEnabled,
+            'jobTitleCatalogOptions' => $jobTitleCatalogOptions,
+            'areaScopeLabel' => $this->tirtaAreaScopeLabel(),
             'generatedPassword' => session('generated_password'),
             'stats' => [
                 'total' => $users->count(),
                 'active' => $users->where('is_active', true)->count(),
                 'inactive' => $users->where('is_active', false)->count(),
-                'owners' => $users->filter(fn (User $user): bool => $user->roleSlug() === 'owner')->count(),
+                'owners' => $users->filter(fn (User $user): bool => $user->roleCapabilitySlug() === 'owner')->count(),
+                'area_assigned' => $users->whereNotNull('service_area_id')->count(),
+                'job_filled' => $jobTitleSchemaReady ? $users->filter(fn (User $user): bool => filled($user->job_title))->count() : 0,
             ],
         ]);
     }
@@ -56,13 +84,7 @@ class TenantUserController extends Controller
         $this->ensureSchemaReadyForWrite();
 
         $roles = $this->manageableRoles($manager);
-
-        $validated = $request->validate([
-            'name' => ['required', 'string', 'max:255'],
-            'email' => ['required', 'email', 'max:255', Rule::unique('users', 'email')],
-            'role_id' => ['required', Rule::in($roles->pluck('id')->all())],
-            'is_active' => ['nullable', 'boolean'],
-        ]);
+        $validated = $this->validatedUserPayload($request, $roles);
 
         $role = $roles->firstWhere('id', $validated['role_id']);
         $password = Str::password(12);
@@ -72,8 +94,14 @@ class TenantUserController extends Controller
             'email' => Str::lower($validated['email']),
             'password' => $password,
             'role_id' => $validated['role_id'],
+            'service_area_id' => $validated['service_area_id'],
             'is_active' => (bool) $request->boolean('is_active', true),
         ]);
+        if ($this->jobTitleSchemaReady()) {
+            $user->forceFill([
+                'job_title' => $validated['job_title'],
+            ])->save();
+        }
 
         return redirect()
             ->route('tenant.users.index')
@@ -94,13 +122,7 @@ class TenantUserController extends Controller
 
         $user = $this->findUser($id);
         $roles = $this->manageableRoles($manager, $user);
-
-        $validated = $request->validate([
-            'name' => ['required', 'string', 'max:255'],
-            'email' => ['required', 'email', 'max:255', Rule::unique('users', 'email')->ignore($user->getKey(), $user->getKeyName())],
-            'role_id' => ['required', Rule::in($roles->pluck('id')->all())],
-            'is_active' => ['required', 'boolean'],
-        ]);
+        $validated = $this->validatedUserPayload($request, $roles, $user);
 
         $role = $roles->firstWhere('id', $validated['role_id']);
         $nextRoleSlug = $role?->slug;
@@ -112,8 +134,15 @@ class TenantUserController extends Controller
             'name' => $validated['name'],
             'email' => Str::lower($validated['email']),
             'role_id' => $validated['role_id'],
+            'service_area_id' => $validated['service_area_id'],
             'is_active' => $nextIsActive,
-        ])->save();
+        ]);
+
+        if ($this->jobTitleSchemaReady()) {
+            $user->job_title = $validated['job_title'];
+        }
+
+        $user->save();
 
         return redirect()
             ->route('tenant.users.index')
@@ -174,7 +203,7 @@ class TenantUserController extends Controller
         abort_unless($user instanceof User, 403);
         abort_unless($user->canManageUsers(), 403, 'Hanya owner atau admin aktif yang bisa mengelola pengguna.');
 
-        return $user->loadMissing('role');
+        return $user->loadMissing(['role', 'serviceArea.parent']);
     }
 
     /**
@@ -183,8 +212,8 @@ class TenantUserController extends Controller
     protected function roles(): EloquentCollection
     {
         return Role::query()
-            ->whereIn('slug', ['owner', 'admin', 'staff'])
-            ->orderByRaw("case slug when 'owner' then 1 when 'admin' then 2 else 3 end")
+            ->orderByRaw("case slug when 'owner' then 1 when 'admin' then 2 when 'staff' then 3 when 'meter_reader' then 4 else 99 end")
+            ->orderBy('name')
             ->get();
     }
 
@@ -199,13 +228,19 @@ class TenantUserController extends Controller
             return $roles;
         }
 
-        $targetRoleSlug = $target?->roleSlug();
+        $targetRoleSlug = $target?->roleCapabilitySlug();
 
         if ($targetRoleSlug === 'owner') {
             abort(403, 'Admin tenant tidak bisa mengubah akun owner.');
         }
 
-        return $roles->filter(fn (Role $role): bool => $role->slug !== 'owner')->values();
+        return $roles->filter(function (Role $role): bool {
+            $capability = filled($role->capability_slug ?? null)
+                ? (string) $role->capability_slug
+                : (string) $role->slug;
+
+            return $capability !== 'owner';
+        })->values();
     }
 
     protected function tenantSetting(): TenantSetting
@@ -222,19 +257,22 @@ class TenantUserController extends Controller
 
     protected function findUser(string $id): User
     {
-        return User::query()->with('role')->findOrFail($id);
+        return User::query()
+            ->with(['role', 'serviceArea.parent'])
+            ->when($this->tirtaAreaIsRestricted(), fn ($query) => $query->whereIn('service_area_id', $this->tirtaAllowedAreaIds()->all()))
+            ->findOrFail($id);
     }
 
     protected function ensureManageableTarget(User $user, User $manager): void
     {
-        if ($manager->roleSlug() !== 'owner' && $user->roleSlug() === 'owner') {
+        if ($manager->roleSlug() !== 'owner' && $user->roleCapabilitySlug() === 'owner') {
             abort(403, 'Admin tenant tidak bisa mengelola akun owner.');
         }
     }
 
     protected function guardCriticalUserChange(User $user, ?string $nextRoleSlug, bool $nextIsActive, User $currentUser): void
     {
-        $currentRoleSlug = $user->roleSlug();
+        $currentRoleSlug = $user->roleCapabilitySlug();
 
         $this->ensureManageableTarget($user, $currentUser);
 
@@ -259,7 +297,13 @@ class TenantUserController extends Controller
         }
 
         $activeOwnerIds = Role::query()
-            ->where('slug', 'owner')
+            ->where(function ($query): void {
+                $query->where('slug', 'owner');
+
+                if (Schema::hasColumn('roles', 'capability_slug')) {
+                    $query->orWhere('capability_slug', 'owner');
+                }
+            })
             ->pluck('id');
 
         $activeOwnersCount = User::query()
@@ -280,12 +324,93 @@ class TenantUserController extends Controller
             ['name' => 'Owner', 'slug' => 'owner'],
             ['name' => 'Admin', 'slug' => 'admin'],
             ['name' => 'Staff', 'slug' => 'staff'],
+            ['name' => 'Petugas Catat Meter', 'slug' => 'meter_reader'],
         ] as $role) {
-            Role::query()->firstOrCreate(
+            $record = Role::query()->firstOrCreate(
                 ['slug' => $role['slug']],
                 ['name' => $role['name']]
             );
+
+            if (Schema::hasColumn('roles', 'capability_slug') && blank($record->capability_slug ?? null)) {
+                $record->forceFill([
+                    'capability_slug' => $role['slug'],
+                ])->save();
+            }
         }
+    }
+
+    /**
+     * @return EloquentCollection<int, ServiceArea>
+     */
+    protected function serviceAreas(): EloquentCollection
+    {
+        return ServiceArea::query()
+            ->with('parent')
+            ->when($this->tirtaAreaIsRestricted(), fn ($query) => $query->whereIn('id', $this->tirtaAllowedAreaIds()->all()))
+            ->orderByRaw("case area_type when 'branch' then 1 when 'unit' then 2 when 'rayon' then 3 else 4 end")
+            ->orderBy('sort_order')
+            ->orderBy('name')
+            ->get();
+    }
+
+    protected function validatedUserPayload(Request $request, EloquentCollection $roles, ?User $user = null): array
+    {
+        $rules = [
+            'name' => ['required', 'string', 'max:255'],
+            'email' => ['required', 'email', 'max:255', Rule::unique('users', 'email')->ignore($user?->getKey(), $user?->getKeyName() ?? 'id')],
+            'role_id' => ['required', Rule::in($roles->pluck('id')->all())],
+            'is_active' => [$user instanceof User ? 'required' : 'nullable', 'boolean'],
+        ];
+
+        if ($this->jobTitleSchemaReady()) {
+            $rules['job_title'] = ['nullable', 'string', 'max:120'];
+
+            if ($this->jobTitleCatalogEnabled()) {
+                $options = $this->jobTitleCatalogOptions()->all();
+
+                if ($options !== []) {
+                    $rules['job_title'][] = Rule::in($options);
+                }
+            }
+        }
+
+        if ($this->serviceAreaSchemaReady()) {
+            $rules['service_area_id'] = [
+                $this->tirtaAreaIsRestricted() ? 'required' : 'nullable',
+                'string',
+                Rule::exists('service_areas', 'id'),
+            ];
+        }
+
+        $validated = $request->validate($rules);
+        $validated['job_title'] = $this->jobTitleSchemaReady() && filled($validated['job_title'] ?? null)
+            ? trim((string) $validated['job_title'])
+            : null;
+        $validated['service_area_id'] = $this->serviceAreaSchemaReady() && filled($validated['service_area_id'] ?? null)
+            ? (string) $validated['service_area_id']
+            : null;
+
+        if ($validated['service_area_id'] !== null) {
+            $serviceArea = ServiceArea::query()->findOrFail($validated['service_area_id']);
+
+            if (! (bool) $serviceArea->is_active) {
+                throw ValidationException::withMessages([
+                    'service_area_id' => 'Area kerja user harus mengarah ke area yang aktif.',
+                ]);
+            }
+
+            $this->ensureTirtaAreaAccessible(
+                (string) $serviceArea->getKey(),
+                'service_area_id',
+                'User hanya bisa dipasang ke area yang termasuk cakupan kerja Anda.'
+            );
+        } elseif ($this->tirtaAreaIsRestricted()) {
+            throw ValidationException::withMessages([
+                'service_area_id' => sprintf('User baru harus dipasang ke area %s atau turunannya.', $this->tirtaAreaScopeLabel() ?? 'kerja Anda'),
+            ]);
+        }
+
+        return $validated;
     }
 
     protected function schemaReady(): bool
@@ -305,5 +430,83 @@ class TenantUserController extends Controller
         throw ValidationException::withMessages([
             'users' => 'Fondasi role/status user tenant belum siap. Jalankan migrasi tenant terbaru dulu.',
         ]);
+    }
+
+    protected function serviceAreaSchemaReady(): bool
+    {
+        return Schema::hasTable('users')
+            && Schema::hasTable('service_areas')
+            && Schema::hasColumn('users', 'service_area_id');
+    }
+
+    protected function jobTitleSchemaReady(): bool
+    {
+        return Schema::hasTable('users')
+            && Schema::hasColumn('users', 'job_title');
+    }
+
+    protected function userMetaSettingsSchemaReady(): bool
+    {
+        return Schema::hasTable('tenant_settings')
+            && Schema::hasColumn('tenant_settings', 'use_job_title_master');
+    }
+
+    protected function jobTitleCatalogEnabled(): bool
+    {
+        if (! $this->userMetaSettingsSchemaReady() || ! Schema::hasTable('job_titles')) {
+            return false;
+        }
+
+        return (bool) ($this->tenantSetting()->getAttribute('use_job_title_master') ?? false);
+    }
+
+    protected function jobTitleCatalogOptions(): Collection
+    {
+        if (! Schema::hasTable('job_titles')) {
+            return collect();
+        }
+
+        return JobTitle::query()
+            ->where('is_active', true)
+            ->orderBy('sort_order')
+            ->orderBy('name')
+            ->pluck('name')
+            ->map(fn ($name) => trim((string) $name))
+            ->filter(fn ($name) => $name !== '')
+            ->values();
+    }
+
+    protected function serviceAreaOptions(EloquentCollection $serviceAreas): Collection
+    {
+        $indexed = $serviceAreas->keyBy(fn (ServiceArea $serviceArea): string => (string) $serviceArea->getKey());
+
+        return $serviceAreas->mapWithKeys(function (ServiceArea $serviceArea) use ($indexed): array {
+            return [
+                (string) $serviceArea->getKey() => $this->serviceAreaHierarchyLabel($serviceArea, $indexed),
+            ];
+        });
+    }
+
+    protected function serviceAreaHierarchyLabel(ServiceArea $serviceArea, Collection $indexed): string
+    {
+        $segments = [$serviceArea->name];
+        $parentId = $serviceArea->parent_id;
+        $visited = [(string) $serviceArea->getKey()];
+
+        while ($parentId !== null && $indexed->has((string) $parentId)) {
+            /** @var ServiceArea $parent */
+            $parent = $indexed->get((string) $parentId);
+            $parentKey = (string) $parent->getKey();
+
+            if (in_array($parentKey, $visited, true)) {
+                break;
+            }
+
+            array_unshift($segments, $parent->name);
+            $visited[] = $parentKey;
+            $parentId = $parent->parent_id;
+        }
+
+        return implode(' / ', $segments);
     }
 }

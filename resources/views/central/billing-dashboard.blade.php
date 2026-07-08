@@ -8,6 +8,29 @@
         $currentUser = auth('central')->user();
         $canManageBilling = $currentUser?->canAccessCentral('billing.manage') ?? false;
         $canViewUsers = $currentUser?->canAccessCentral('users.view') ?? false;
+        $bulkHealthActions = [
+            [
+                'status' => 'legacy_only',
+                'label' => 'Bulk Repair Legacy',
+                'count' => (int) data_get($billingDashboard, 'invoice_health.legacy_only', 0),
+                'confirm_variant' => 'default',
+                'message' => 'Jalankan bulk repair untuk semua tenant legacy_only? Invoice legacy akan dibackfill ke relasional lalu shadow yang aman dibersihkan.',
+            ],
+            [
+                'status' => 'relational_shadow',
+                'label' => 'Bulk Cleanup Shadow',
+                'count' => (int) data_get($billingDashboard, 'invoice_health.relational_shadow', 0),
+                'confirm_variant' => 'default',
+                'message' => 'Jalankan bulk cleanup shadow untuk semua tenant relational_shadow? Shadow legacy yang aman akan dibersihkan.',
+            ],
+            [
+                'status' => 'mismatch',
+                'label' => 'Bulk Force Sync',
+                'count' => (int) data_get($billingDashboard, 'invoice_health.mismatch', 0),
+                'confirm_variant' => 'danger',
+                'message' => 'Jalankan bulk force repair mismatch untuk semua tenant mismatch? Shadow legacy akan direbuild dari source of truth relasional.',
+            ],
+        ];
     @endphp
 
     <div class="page-grid">
@@ -194,6 +217,28 @@
                     </div>
                 </div>
             </div>
+
+            <div class="stat-card">
+                <div class="stat-inner">
+                    <span class="stat-icon"><i class="fas fa-database"></i></span>
+                    <div class="stat-copy">
+                        <p>Relasional Only</p>
+                        <strong>{{ data_get($billingDashboard, 'invoice_health.relational_only', 0) }}</strong>
+                        <span>{{ data_get($billingDashboard, 'invoice_health.relational_shadow', 0) }} masih shadow</span>
+                    </div>
+                </div>
+            </div>
+
+            <div class="stat-card">
+                <div class="stat-inner">
+                    <span class="stat-icon"><i class="fas fa-triangle-exclamation"></i></span>
+                    <div class="stat-copy">
+                        <p>Legacy Risk</p>
+                        <strong>{{ data_get($billingDashboard, 'invoice_health.legacy_only', 0) + data_get($billingDashboard, 'invoice_health.mismatch', 0) }}</strong>
+                        <span>{{ data_get($billingDashboard, 'invoice_health.mismatch', 0) }} mismatch</span>
+                    </div>
+                </div>
+            </div>
         </section>
 
         <section class="content-grid">
@@ -263,6 +308,90 @@
                             <span>Blocked by Billing</span>
                             <strong>{{ $billingDashboard['invoice_blocked_count'] }}</strong>
                         </div>
+                        <div class="mini-row">
+                            <span>Relasional Only</span>
+                            <strong class="status-active">{{ data_get($billingDashboard, 'invoice_health.relational_only', 0) }}</strong>
+                        </div>
+                        <div class="mini-row">
+                            <span>Relasional + Shadow</span>
+                            <strong class="status-pending">{{ data_get($billingDashboard, 'invoice_health.relational_shadow', 0) }}</strong>
+                        </div>
+                        <div class="mini-row">
+                            <span>Legacy Only</span>
+                            <strong class="status-pending">{{ data_get($billingDashboard, 'invoice_health.legacy_only', 0) }}</strong>
+                        </div>
+                        <div class="mini-row">
+                            <span>Mismatch</span>
+                            <strong class="status-muted">{{ data_get($billingDashboard, 'invoice_health.mismatch', 0) }}</strong>
+                        </div>
+                    </div>
+
+                    @if ($canManageBilling)
+                        <div class="quick-grid" style="margin-top: 14px;">
+                            @foreach ($bulkHealthActions as $action)
+                                @if ($action['count'] > 0)
+                                    <form method="POST" action="{{ route('central.super-admin.tenants.repair-bulk') }}">
+                                        @csrf
+                                        <input type="hidden" name="invoice_health" value="{{ $action['status'] }}">
+                                        <button
+                                            class="quick-item"
+                                            type="submit"
+                                            style="width: 100%; text-align: left;"
+                                            data-confirm
+                                            data-confirm-variant="{{ $action['confirm_variant'] }}"
+                                            data-confirm-title="{{ $action['label'] }}"
+                                            data-confirm-message="{{ $action['message'] }}"
+                                            data-confirm-confirm-label="Ya, gas bulk"
+                                        >
+                                            <div>
+                                                <strong>{{ $action['label'] }}</strong>
+                                                <span>{{ $action['count'] }} tenant siap diproses</span>
+                                            </div>
+                                            <i class="fas fa-wrench muted"></i>
+                                        </button>
+                                    </form>
+                                @endif
+                            @endforeach
+                        </div>
+                    @endif
+                </section>
+
+                <section class="dashboard-card">
+                    <div class="card-head">
+                        <div>
+                            <h3 class="card-title">Invoice Health Watchlist</h3>
+                        </div>
+                    </div>
+
+                    <div class="quick-grid">
+                        @forelse (data_get($billingDashboard, 'invoice_health_watchlist', []) as $watchItem)
+                            @php
+                                $healthClass = match ($watchItem['health_status']) {
+                                    'mismatch' => 'status-muted',
+                                    'legacy_only', 'relational_shadow' => 'status-pending',
+                                    default => 'status-active',
+                                };
+                            @endphp
+                            <a class="quick-item" href="{{ $watchItem['detail_url'] }}">
+                                <div>
+                                    <strong>{{ $watchItem['tenant_name'] }}</strong>
+                                    <span class="{{ $healthClass }}">{{ $watchItem['health_label'] }}</span>
+                                    <span>Rel {{ $watchItem['relational_count'] }} / Legacy {{ $watchItem['legacy_count'] }}</span>
+                                    @if (collect($watchItem['mismatch_invoice_numbers'])->isNotEmpty())
+                                        <span>Mismatch: {{ collect($watchItem['mismatch_invoice_numbers'])->take(2)->implode(', ') }}</span>
+                                    @endif
+                                </div>
+                                <i class="fas fa-arrow-right muted"></i>
+                            </a>
+                        @empty
+                            <div class="quick-item">
+                                <div>
+                                    <strong>Invoice health aman</strong>
+                                    <span>Belum ada tenant legacy atau mismatch yang perlu ditindak.</span>
+                                </div>
+                                <i class="fas fa-circle-check muted"></i>
+                            </div>
+                        @endforelse
                     </div>
                 </section>
             </aside>

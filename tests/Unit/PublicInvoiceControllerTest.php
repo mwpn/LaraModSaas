@@ -10,6 +10,7 @@ use App\Services\Central\CentralAuditLogger;
 use App\Services\Central\ManualTransferInboxService;
 use App\Services\Central\ManualTransferService;
 use App\Services\Central\MessageTemplateRenderer;
+use App\Services\Central\TenantSubscriptionInvoiceService;
 use PHPUnit\Framework\TestCase;
 
 class PublicInvoiceControllerTest extends TestCase
@@ -17,11 +18,14 @@ class PublicInvoiceControllerTest extends TestCase
     public function test_it_normalizes_payment_payload_for_public_invoice_flow(): void
     {
         $auditLogger = new CentralAuditLogger();
+        $invoiceService = new TenantSubscriptionInvoiceService();
+        $manualTransferService = new ManualTransferService($auditLogger, $invoiceService);
         $controller = new PublicInvoiceControllerTestProxy(
             $auditLogger,
-            new ManualTransferService($auditLogger),
-            new ManualTransferInboxService($auditLogger, new ManualTransferService($auditLogger)),
-            new BillingNotificationService($auditLogger, new MessageTemplateRenderer())
+            $manualTransferService,
+            new ManualTransferInboxService($auditLogger, $manualTransferService),
+            new BillingNotificationService($auditLogger, new MessageTemplateRenderer()),
+            $invoiceService
         );
 
         $normalized = $controller->normalize([

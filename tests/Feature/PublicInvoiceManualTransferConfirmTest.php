@@ -9,6 +9,7 @@ use App\Models\Tenant;
 use App\Services\Central\CentralAuditLogger;
 use App\Services\Central\ManualTransferInboxService;
 use App\Services\Central\ManualTransferService;
+use App\Services\Central\TenantSubscriptionInvoiceService;
 use Carbon\CarbonImmutable;
 use Illuminate\Database\Schema\Blueprint;
 use Illuminate\Support\Facades\Schema;
@@ -137,7 +138,7 @@ class FakeManualTransferInboxService extends ManualTransferInboxService
     {
         $auditLogger = new CentralAuditLogger();
 
-        parent::__construct($auditLogger, new ManualTransferService($auditLogger));
+        parent::__construct($auditLogger, new ManualTransferService($auditLogger, new TenantSubscriptionInvoiceService()));
     }
 
     public function fetchAndReconcileInvoice(Tenant $tenant, array $invoice): array

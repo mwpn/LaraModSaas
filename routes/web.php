@@ -176,6 +176,12 @@ foreach (config('tenancy.central_domains', []) as $domain) {
                 Route::post('/tenants/{id}/billing/generate-invoice', [SuperAdminTenantController::class, 'generateInvoice'])
                     ->name('tenants.generate-invoice');
 
+                Route::post('/tenants/{id}/billing/repair-invoices', [SuperAdminTenantController::class, 'repairInvoices'])
+                    ->name('tenants.repair-invoices');
+
+                Route::post('/tenants/billing/repair-bulk', [SuperAdminTenantController::class, 'bulkRepairInvoices'])
+                    ->name('tenants.repair-bulk');
+
                 Route::post('/tenants/{id}/billing/create-qris', [SuperAdminTenantController::class, 'createInvoiceQris'])
                     ->name('tenants.create-qris');
 
@@ -216,6 +222,9 @@ foreach (config('tenancy.central_domains', []) as $domain) {
 
                 Route::post('/tenants/{id}/switch-saas', [SuperAdminTenantController::class, 'switchSaas'])
                     ->name('tenants.switch-saas');
+
+                Route::post('/tenants/{id}/modules/{moduleName}/toggle', [SuperAdminTenantController::class, 'toggleModule'])
+                    ->name('tenants.toggle-module');
 
                 Route::post('/tenants/{id}/delete', [SuperAdminTenantController::class, 'destroy'])
                     ->name('tenants.destroy');

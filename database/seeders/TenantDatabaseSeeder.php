@@ -20,6 +20,7 @@ class TenantDatabaseSeeder extends Seeder
             ['name' => 'Owner', 'slug' => 'owner'],
             ['name' => 'Admin', 'slug' => 'admin'],
             ['name' => 'Staff', 'slug' => 'staff'],
+            ['name' => 'Petugas Catat Meter', 'slug' => 'meter_reader'],
         ] as $role) {
             $exists = DB::table('roles')->where('slug', $role['slug'])->exists();
 

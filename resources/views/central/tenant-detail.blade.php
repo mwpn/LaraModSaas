@@ -62,6 +62,24 @@
         $tenantUserStats = data_get($tenantUserWorkspaceData, 'stats', ['total' => 0, 'active' => 0, 'inactive' => 0, 'owners' => 0]);
         $tenantUserGeneratedPassword = session('tenant_user_generated_password');
         $collectibleInvoice = data_get($tenantBillingSummary, 'collectible_invoice');
+        $tenantModuleItems = data_get($tenantModuleSummary, 'items', []);
+        $tenantModuleCounts = data_get($tenantModuleSummary, 'counts', [
+            'total' => 0,
+            'enabled' => 0,
+            'disabled' => 0,
+            'blocked' => 0,
+            'toggleable' => 0,
+        ]);
+        $invoiceHealth = (array) data_get($tenantBillingSummary, 'invoice_health', []);
+        $invoiceHealthStatus = (string) data_get($invoiceHealth, 'status', 'empty');
+        $invoiceHealthClass = match ($invoiceHealthStatus) {
+            'relational_only' => 'status-active',
+            'relational_shadow', 'legacy_only' => 'status-pending',
+            'mismatch', 'tables_missing' => 'status-muted',
+            default => 'status-muted',
+        };
+        $canRepairInvoiceHealth = in_array($invoiceHealthStatus, ['legacy_only', 'relational_shadow'], true);
+        $canForceRepairInvoiceMismatch = $invoiceHealthStatus === 'mismatch';
     @endphp
 
     <div class="page-grid">
@@ -312,6 +330,52 @@
                                     <i class="fas fa-file-invoice-dollar muted"></i>
                                 </button>
                             </form>
+
+                            @if ($canRepairInvoiceHealth)
+                                <form method="POST" action="{{ route('central.super-admin.tenants.repair-invoices', $tenant->id) }}">
+                                    @csrf
+                                    <input type="hidden" name="mode" value="auto">
+                                    <input type="hidden" name="cleanup_shadow" value="1">
+                                    <button
+                                        class="quick-item"
+                                        type="submit"
+                                        style="width: 100%; text-align: left;"
+                                        data-confirm
+                                        data-confirm-title="Repair Invoice Health"
+                                        data-confirm-message="Jalankan repair invoice untuk tenant {{ $tenant->id }} dengan mode aman? Status sekarang: {{ data_get($invoiceHealth, 'label', 'Kosong') }}. Mode auto akan backfill legacy ke relasional, membersihkan shadow yang aman, dan skip mismatch yang butuh review manual."
+                                        data-confirm-confirm-label="Ya, repair"
+                                    >
+                                        <div>
+                                            <strong>Repair Invoice Health</strong>
+                                            <span>{{ data_get($invoiceHealth, 'label', 'Kosong') }} · auto repair + cleanup shadow aman</span>
+                                        </div>
+                                        <i class="fas fa-wrench muted"></i>
+                                    </button>
+                                </form>
+                            @endif
+
+                            @if ($canForceRepairInvoiceMismatch)
+                                <form method="POST" action="{{ route('central.super-admin.tenants.repair-invoices', $tenant->id) }}">
+                                    @csrf
+                                    <input type="hidden" name="mode" value="relational_to_legacy">
+                                    <button
+                                        class="quick-item"
+                                        type="submit"
+                                        style="width: 100%; text-align: left;"
+                                        data-confirm
+                                        data-confirm-variant="danger"
+                                        data-confirm-title="Force Repair Mismatch"
+                                        data-confirm-message="Paksa sinkron shadow legacy dari source of truth relasional untuk tenant {{ $tenant->id }}? Ini dipakai khusus saat invoice health mismatch dan akan menimpa shadow legacy agar mengikuti data relasional sekarang."
+                                        data-confirm-confirm-label="Ya, paksa sinkron"
+                                    >
+                                        <div>
+                                            <strong>Force Repair Mismatch</strong>
+                                            <span>Mismatch · rebuild legacy shadow dari data relasional</span>
+                                        </div>
+                                        <i class="fas fa-triangle-exclamation muted"></i>
+                                    </button>
+                                </form>
+                            @endif
                         @endif
 
                         <a class="quick-item" href="#tenant-users">
@@ -775,19 +839,85 @@
                     <div class="card-head">
                         <div>
                             <h3 class="card-title">Runtime Modules</h3>
+                            <p class="card-subtitle">Entitlement final tenant berdasarkan package, rule required, dan toggle manual.</p>
+                        </div>
+                        <div class="inline-actions">
+                            <span class="status-active">{{ $tenantModuleCounts['enabled'] }} enabled</span>
+                            <span class="status-pending">{{ $tenantModuleCounts['disabled'] }} disabled</span>
+                            <span class="status-muted">{{ $tenantModuleCounts['blocked'] }} blocked</span>
+                        </div>
+                    </div>
+
+                    <div class="mini-list" style="margin-bottom: 16px;">
+                        <div class="mini-row">
+                            <span>Allowed Modules</span>
+                            <strong>{{ count(data_get($tenantModuleSummary, 'allowed', [])) }}</strong>
+                        </div>
+                        <div class="mini-row">
+                            <span>Enabled Modules</span>
+                            <strong>{{ $tenantModuleCounts['enabled'] }}</strong>
+                        </div>
+                        <div class="mini-row">
+                            <span>Toggleable</span>
+                            <strong>{{ $tenantModuleCounts['toggleable'] }}</strong>
                         </div>
                     </div>
 
                     <div class="quick-grid">
-                        @foreach ($tenantRuntimeModules as $moduleName)
+                        @forelse ($tenantModuleItems as $module)
+                            @php
+                                $moduleStatusClass = match ($module['status']) {
+                                    'enabled' => 'status-active',
+                                    'blocked' => 'status-muted',
+                                    default => 'status-pending',
+                                };
+                                $moduleSourceLabel = match ($module['enabled_source']) {
+                                    'required' => 'Required',
+                                    'tenant_toggle' => 'Manual',
+                                    'package_default' => 'Package',
+                                    default => $module['is_allowed'] ? 'Allowed' : 'Blocked',
+                                };
+                            @endphp
+                            <div class="quick-item" style="align-items: stretch;">
+                                <div>
+                                    <strong>{{ $module['label'] }}</strong>
+                                    <span>{{ $module['description'] ?: 'Modul aktifasi tenant.' }}</span>
+                                    <span>{{ $module['status_label'] }} · {{ $moduleSourceLabel }}</span>
+                                    @if ($module['reason_code'])
+                                        <span>Reason: {{ str_replace('_', ' ', $module['reason_code']) }}</span>
+                                    @endif
+                                </div>
+                                <div style="display: grid; gap: 8px; justify-items: end;">
+                                    <span class="{{ $moduleStatusClass }}">{{ $module['status_label'] }}</span>
+                                    @if ($canManageTenants && $module['toggleable'])
+                                        <form method="POST" action="{{ route('central.super-admin.tenants.toggle-module', [$tenant->id, $module['module_name']]) }}">
+                                            @csrf
+                                            <input type="hidden" name="enabled" value="{{ $module['status'] === 'enabled' ? 0 : 1 }}">
+                                            <button
+                                                class="central-btn-secondary"
+                                                type="submit"
+                                                data-confirm
+                                                data-confirm-title="{{ $module['status'] === 'enabled' ? 'Nonaktifkan modul?' : 'Aktifkan modul?' }}"
+                                                data-confirm-message="Ubah status modul {{ $module['label'] }} untuk tenant {{ $tenant->id }} sekarang?"
+                                                data-confirm-confirm-label="{{ $module['status'] === 'enabled' ? 'Ya, nonaktifkan' : 'Ya, aktifkan' }}"
+                                            >
+                                                {{ $module['status'] === 'enabled' ? 'Disable' : 'Enable' }}
+                                            </button>
+                                        </form>
+                                    @elseif ($module['is_required'])
+                                        <span class="status-muted">Locked</span>
+                                    @endif
+                                </div>
+                            </div>
+                        @empty
                             <div class="quick-item">
                                 <div>
-                                    <strong>{{ $moduleName }}</strong>
-                                    <span>Aktif untuk workspace ini</span>
+                                    <strong>Belum ada module states</strong>
+                                    <span>Jalankan sync tenant runtime untuk membangun state modul tenant.</span>
                                 </div>
-                                <span class="status-active">On</span>
+                                <span class="status-muted">Empty</span>
                             </div>
-                        @endforeach
+                        @endforelse
                     </div>
                 </section>
 
@@ -802,6 +932,22 @@
                         <div class="mini-row">
                             <span>Status</span>
                             <strong class="{{ $subscriptionClass }}">{{ $subscriptionLabel }}</strong>
+                        </div>
+                        <div class="mini-row">
+                            <span>Invoice Health</span>
+                            <strong class="{{ $invoiceHealthClass }}">{{ data_get($invoiceHealth, 'label', 'Kosong') }}</strong>
+                        </div>
+                        <div class="mini-row">
+                            <span>Relasional</span>
+                            <strong>{{ (int) data_get($invoiceHealth, 'relational_count', 0) }} invoice</strong>
+                        </div>
+                        <div class="mini-row">
+                            <span>Legacy Shadow</span>
+                            <strong>{{ (int) data_get($invoiceHealth, 'legacy_count', 0) }} invoice</strong>
+                        </div>
+                        <div class="mini-row">
+                            <span>Legacy Meta</span>
+                            <strong>{{ collect(data_get($invoiceHealth, 'legacy_meta_keys', []))->implode(', ') ?: '-' }}</strong>
                         </div>
                         <div class="mini-row">
                             <span>Setup Fee</span>
@@ -830,6 +976,12 @@
                         <div class="mini-row">
                             <span>Billing Sync</span>
                             <strong>{{ data_get($tenantBillingSummary, 'last_synced_at')?->format('d M Y H:i') ?? '-' }}</strong>
+                        </div>
+                        <div class="mini-row" style="align-items: flex-start;">
+                            <span>Mismatch Invoice</span>
+                            <strong style="max-width: 320px; line-height: 1.7;">
+                                {{ collect(data_get($invoiceHealth, 'mismatch_invoice_numbers', []))->take(4)->implode(', ') ?: '-' }}
+                            </strong>
                         </div>
                     </div>
                 </section>

@@ -6,6 +6,7 @@
 @section('content')
     @php
         $managerIsOwner = $manager->roleSlug() === 'owner';
+        $manageableRoles = $manageableRoles ?? $roles;
     @endphp
 
     <div class="page-grid">
@@ -30,11 +31,23 @@
             </div>
         @endif
 
+        @if (! empty($areaScopeLabel))
+            <div class="alert alert-info">
+                Manajemen user dibatasi ke area kerja <strong>{{ $areaScopeLabel }}</strong> dan turunannya.
+            </div>
+        @endif
+
+        @if (! $jobTitleSchemaReady)
+            <div class="alert alert-danger">
+                Kolom `job_title` di database tenant belum siap. Jalankan migrasi tenant terbaru dulu supaya jabatan pengguna bisa disimpan.
+            </div>
+        @endif
+
         <section class="hero-card">
             <div>
                 <span class="hero-badge"><i class="fas fa-users-cog"></i> Tenant Access</span>
                 <h2>Manajemen Pengguna</h2>
-                <p>Tambah user baru, atur role owner/admin/staff, aktifkan atau nonaktifkan akses, dan reset password langsung dari workspace tenant.</p>
+                <p>Tambah user baru, atur role sistem, jabatan operasional, dan area kerja seperti cabang, unit, atau rayon, aktifkan atau nonaktifkan akses, dan reset password langsung dari workspace tenant.</p>
             </div>
 
             <div class="hero-meta">
@@ -85,6 +98,28 @@
 
             <div class="stat-card">
                 <div class="stat-inner">
+                    <span class="stat-icon"><i class="fas fa-map-location-dot"></i></span>
+                    <div class="stat-copy">
+                        <p>Area Terpasang</p>
+                        <strong>{{ $stats['area_assigned'] }}</strong>
+                        <span>User sudah punya area kerja</span>
+                    </div>
+                </div>
+            </div>
+
+            <div class="stat-card">
+                <div class="stat-inner">
+                    <span class="stat-icon"><i class="fas fa-id-card-clip"></i></span>
+                    <div class="stat-copy">
+                        <p>Jabatan Terisi</p>
+                        <strong>{{ $stats['job_filled'] }}</strong>
+                        <span>User sudah punya jabatan operasional</span>
+                    </div>
+                </div>
+            </div>
+
+            <div class="stat-card">
+                <div class="stat-inner">
                     <span class="stat-icon"><i class="fas fa-user-slash"></i></span>
                     <div class="stat-copy">
                         <p>User Nonaktif</p>
@@ -114,12 +149,12 @@
                     <div class="card-head">
                         <div>
                             <h3 class="card-title">Daftar Pengguna</h3>
-                            <p class="card-subtitle">Edit profil user, role, status akses, dan password dari satu workspace.</p>
+                            <p class="card-subtitle">Edit profil user, role, jabatan, area kerja, status akses, dan password dari satu workspace.</p>
                         </div>
                     </div>
 
                     <div class="form-stack">
-                        @foreach ($users as $user)
+                        @forelse ($users as $user)
                             @php
                                 $userRoleSlug = $user->roleSlug();
                                 $isCurrentUser = $manager->getKey() === $user->getKey();
@@ -142,9 +177,15 @@
 
                                         <span class="status-pending">{{ ucfirst((string) ($userRoleSlug ?? 'staff')) }}</span>
 
+                                        @if (filled($user->job_title))
+                                            <span class="status-muted">{{ $user->job_title }}</span>
+                                        @endif
+
                                         @if ($isCurrentUser)
                                             <span class="status-muted">Akun Saat Ini</span>
                                         @endif
+
+                                        <span class="status-muted">{{ $user->service_area_id ? $serviceAreaOptions->get($user->service_area_id, $user->serviceArea?->name ?? '-') : 'Tanpa Area' }}</span>
 
                                         @if (! $canManageTarget)
                                             <span class="status-muted">Protected Owner</span>
@@ -164,8 +205,39 @@
                                             </div>
 
                                             <div>
+                                                <label class="field-label" for="job-title-{{ $user->id }}">Jabatan</label>
+                                                @if ($jobTitleSchemaReady)
+                                                    @php
+                                                        $jobTitleCatalogActive = (bool) ($jobTitleCatalogEnabled ?? false);
+                                                        $jobTitleCatalogOptions = $jobTitleCatalogOptions ?? collect();
+                                                    @endphp
+                                                    @if ($jobTitleCatalogActive && $jobTitleCatalogOptions->count() > 0)
+                                                        <select id="job-title-{{ $user->id }}" name="job_title">
+                                                            <option value="">Tanpa jabatan</option>
+                                                            @foreach ($jobTitleCatalogOptions as $jobTitleOption)
+                                                                <option value="{{ $jobTitleOption }}" @selected(old('job_title', $user->job_title) === $jobTitleOption)>{{ $jobTitleOption }}</option>
+                                                            @endforeach
+                                                        </select>
+                                                    @else
+                                                        <input class="field" id="job-title-{{ $user->id }}" type="text" name="job_title" value="{{ old('job_title', $user->job_title) }}" placeholder="Contoh: Supervisor Lapangan">
+                                                    @endif
+                                                @else
+                                                    <input class="field" id="job-title-{{ $user->id }}" type="text" value="Jalankan migrasi tenant terbaru dulu" disabled>
+                                                @endif
+                                            </div>
+                                        </div>
+
+                                        <div style="display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px;">
+                                            <div>
                                                 <label class="field-label" for="email-{{ $user->id }}">Email</label>
                                                 <input class="field" id="email-{{ $user->id }}" type="email" name="email" value="{{ old('email', $user->email) }}">
+                                            </div>
+
+                                            <div class="mini-list" style="align-self: end;">
+                                                <div class="mini-row">
+                                                    <span>Struktur</span>
+                                                    <strong>{{ $user->role?->name ?? 'User' }}{{ filled(old('job_title', $user->job_title)) ? ' | '.old('job_title', $user->job_title) : '' }}</strong>
+                                                </div>
                                             </div>
                                         </div>
 
@@ -177,13 +249,31 @@
                                                     <input class="field" id="role-{{ $user->id }}" type="text" value="{{ $user->role?->name ?? 'Belum ada role' }}" disabled>
                                                 @else
                                                     <select id="role-{{ $user->id }}" name="role_id">
-                                                        @foreach ($roles as $role)
+                                                        @foreach ($manageableRoles as $role)
                                                             <option value="{{ $role->id }}" @selected(old('role_id', $user->role_id) === $role->id)>{{ $role->name }}</option>
                                                         @endforeach
                                                     </select>
                                                 @endif
                                             </div>
 
+                                            <div>
+                                                <label class="field-label" for="area-{{ $user->id }}">Area Kerja</label>
+                                                @if ($serviceAreaSchemaReady)
+                                                    <select id="area-{{ $user->id }}" name="service_area_id">
+                                                        @if (empty($areaScopeLabel))
+                                                            <option value="">Global / tanpa area khusus</option>
+                                                        @endif
+                                                        @foreach ($serviceAreas as $serviceArea)
+                                                            <option value="{{ $serviceArea->id }}" @selected((string) old('service_area_id', $user->service_area_id) === $serviceArea->id)>{{ $serviceAreaOptions->get($serviceArea->id, $serviceArea->name) }}</option>
+                                                        @endforeach
+                                                    </select>
+                                                @else
+                                                    <input class="field" id="area-{{ $user->id }}" type="text" value="Jalankan migrasi area kerja dulu" disabled>
+                                                @endif
+                                            </div>
+                                        </div>
+
+                                        <div style="display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px;">
                                             <div>
                                                 <label class="field-label" for="status-{{ $user->id }}">Status Akses</label>
                                                 @if ($isCurrentUser)
@@ -195,6 +285,12 @@
                                                         <option value="0" @selected((string) old('is_active', $user->isActiveUser() ? '1' : '0') === '0')>Nonaktif</option>
                                                     </select>
                                                 @endif
+                                            </div>
+                                            <div class="mini-list" style="align-self: end;">
+                                                <div class="mini-row">
+                                                    <span>Cakupan</span>
+                                                    <strong>{{ $user->service_area_id ? 'Berlaku di area terpilih dan turunannya' : 'Global untuk seluruh tenant' }}</strong>
+                                                </div>
                                             </div>
                                         </div>
 
@@ -241,13 +337,30 @@
                                             <strong>{{ $user->isActiveUser() ? 'Aktif' : 'Nonaktif' }}</strong>
                                         </div>
                                         <div class="mini-row">
+                                            <span>Jabatan</span>
+                                            <strong>{{ $user->job_title ?: '-' }}</strong>
+                                        </div>
+                                        <div class="mini-row">
+                                            <span>Area Kerja</span>
+                                            <strong>{{ $user->service_area_id ? $serviceAreaOptions->get($user->service_area_id, $user->serviceArea?->name ?? '-') : 'Global / tanpa area khusus' }}</strong>
+                                        </div>
+                                        <div class="mini-row">
                                             <span>Akses</span>
                                             <strong>Hanya owner yang bisa mengubah akun owner lain.</strong>
                                         </div>
                                     </div>
                                 @endif
                             </section>
-                        @endforeach
+                        @empty
+                            <div class="dashboard-card">
+                                <div class="card-head">
+                                    <div>
+                                        <h3 class="card-title">Belum Ada User di Scope Ini</h3>
+                                        <p class="card-subtitle">Belum ada user yang terpasang ke area kerja Anda. Tambahkan user baru di panel samping untuk area ini.</p>
+                                    </div>
+                                </div>
+                            </div>
+                        @endforelse
                     </div>
                 </div>
 
@@ -256,7 +369,7 @@
                         <div class="card-head">
                             <div>
                                 <h3 class="card-title">Tambah Pengguna</h3>
-                                <p class="card-subtitle">Invite user baru tanpa modal.</p>
+                                <p class="card-subtitle">Invite user baru tanpa modal, lengkap dengan role, jabatan, dan area kerja.</p>
                             </div>
                         </div>
 
@@ -274,12 +387,50 @@
                             </div>
 
                             <div>
+                                <label class="field-label" for="new-job-title">Jabatan</label>
+                                @if ($jobTitleSchemaReady)
+                                    @php
+                                        $jobTitleCatalogActive = (bool) ($jobTitleCatalogEnabled ?? false);
+                                        $jobTitleCatalogOptions = $jobTitleCatalogOptions ?? collect();
+                                    @endphp
+                                    @if ($jobTitleCatalogActive && $jobTitleCatalogOptions->count() > 0)
+                                        <select id="new-job-title" name="job_title">
+                                            <option value="">Tanpa jabatan</option>
+                                            @foreach ($jobTitleCatalogOptions as $jobTitleOption)
+                                                <option value="{{ $jobTitleOption }}" @selected(old('job_title') === $jobTitleOption)>{{ $jobTitleOption }}</option>
+                                            @endforeach
+                                        </select>
+                                    @else
+                                        <input class="field" id="new-job-title" type="text" name="job_title" value="{{ old('job_title') }}" placeholder="Contoh: Kolektor / Admin Cabang">
+                                    @endif
+                                @else
+                                    <input class="field" id="new-job-title" type="text" value="Jalankan migrasi tenant terbaru dulu" disabled>
+                                @endif
+                            </div>
+
+                            <div>
                                 <label class="field-label" for="new-role">Role</label>
                                 <select id="new-role" name="role_id">
-                                    @foreach ($roles as $role)
+                                    @foreach ($manageableRoles as $role)
                                         <option value="{{ $role->id }}" @selected(old('role_id') === $role->id)>{{ $role->name }}</option>
                                     @endforeach
                                 </select>
+                            </div>
+
+                            <div>
+                                <label class="field-label" for="new-service-area">Area Kerja</label>
+                                @if ($serviceAreaSchemaReady)
+                                    <select id="new-service-area" name="service_area_id">
+                                        @if (empty($areaScopeLabel))
+                                            <option value="">Global / tanpa area khusus</option>
+                                        @endif
+                                        @foreach ($serviceAreas as $serviceArea)
+                                            <option value="{{ $serviceArea->id }}" @selected(old('service_area_id') === $serviceArea->id)>{{ $serviceAreaOptions->get($serviceArea->id, $serviceArea->name) }}</option>
+                                        @endforeach
+                                    </select>
+                                @else
+                                    <input class="field" id="new-service-area" type="text" value="Jalankan migrasi area kerja dulu" disabled>
+                                @endif
                             </div>
 
                             <label class="remember" style="color: var(--text);">
@@ -310,6 +461,14 @@
                             <div class="mini-row">
                                 <span>Staff</span>
                                 <strong>Operasional biasa</strong>
+                            </div>
+                            <div class="mini-row">
+                                <span>Jabatan</span>
+                                <strong>Posisi kerja nyata seperti admin cabang, kolektor, kasir, atau supervisor lapangan</strong>
+                            </div>
+                            <div class="mini-row">
+                                <span>Area Kerja</span>
+                                <strong>Cabang, unit, atau rayon bisa dipasang per user dan berlaku ke turunannya</strong>
                             </div>
                             <div class="mini-row">
                                 <span>Proteksi</span>

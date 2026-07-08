@@ -11,6 +11,7 @@ use App\Services\Central\BillingNotificationService;
 use App\Services\Central\CentralAuditLogger;
 use App\Services\Central\ManualTransferInboxService;
 use App\Services\Central\ManualTransferService;
+use App\Services\Central\TenantSubscriptionInvoiceService;
 use Carbon\CarbonImmutable;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\RedirectResponse;
@@ -26,6 +27,7 @@ class PublicInvoiceController extends Controller
         protected ManualTransferService $manualTransferService,
         protected ManualTransferInboxService $manualTransferInboxService,
         protected BillingNotificationService $billingNotificationService,
+        protected TenantSubscriptionInvoiceService $tenantSubscriptionInvoiceService,
     ) {
     }
 
@@ -348,21 +350,7 @@ class PublicInvoiceController extends Controller
 
     protected function updateInvoice(Tenant $tenant, string $invoiceNumber, callable $mutator): void
     {
-        $billingInvoices = collect($tenant->billingInvoices())
-            ->map(function (array $invoice) use ($invoiceNumber, $mutator): array {
-                if ($invoice['invoice_number'] !== $invoiceNumber) {
-                    return $invoice;
-                }
-
-                return $mutator($invoice);
-            })
-            ->values()
-            ->all();
-
-        $tenant->forceFill([
-            'billing_invoices' => $billingInvoices,
-            'last_invoice_status_updated_at' => CarbonImmutable::now()->toIso8601String(),
-        ])->save();
+        $this->tenantSubscriptionInvoiceService->mutateInvoice($tenant, $invoiceNumber, $mutator);
     }
 
     protected function normalizeInvoicePayment(array $payment): array

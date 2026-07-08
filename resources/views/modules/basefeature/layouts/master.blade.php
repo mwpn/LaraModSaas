@@ -171,6 +171,7 @@
                 .footer-inner { flex-direction: column; align-items: flex-start; }
             }
         </style>
+        @stack('styles')
         @include('shared.confirm-modal-styles')
     </head>
     <body data-sidebar-open="false">
@@ -230,6 +231,7 @@
                 });
             })();
         </script>
+        @stack('scripts')
         @include('shared.confirm-modal-script')
     </body>
 </html>

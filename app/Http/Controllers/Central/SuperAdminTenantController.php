@@ -15,6 +15,10 @@ use App\Services\Central\BillingNotificationService;
 use App\Services\Central\CentralAuditLogger;
 use App\Services\Central\ManualTransferService;
 use App\Services\Central\MessageTemplateRenderer;
+use App\Services\Central\TenantEntitlementResolver;
+use App\Services\Central\TenantModuleActivationService;
+use App\Services\Central\TenantSubscriptionInvoiceService;
+use App\Services\Central\TenantSubscriptionService;
 use Carbon\CarbonImmutable;
 use Closure;
 use Illuminate\Http\RedirectResponse;
@@ -36,6 +40,10 @@ class SuperAdminTenantController extends Controller
         protected BillingNotificationService $billingNotificationService,
         protected ManualTransferService $manualTransferService,
         protected MessageTemplateRenderer $templateRenderer,
+        protected TenantSubscriptionService $tenantSubscriptionService,
+        protected TenantModuleActivationService $tenantModuleActivationService,
+        protected TenantEntitlementResolver $tenantEntitlementResolver,
+        protected TenantSubscriptionInvoiceService $tenantSubscriptionInvoiceService,
     ) {
     }
 
@@ -44,6 +52,7 @@ class SuperAdminTenantController extends Controller
         $platformSaasType = CentralSetting::platformSaasType();
         $search = trim((string) $request->string('q'));
         $filterSaasType = (string) $request->string('saas_type');
+        $filterInvoiceHealth = (string) $request->string('invoice_health');
 
         $tenantQuery = Tenant::query();
 
@@ -71,12 +80,28 @@ class SuperAdminTenantController extends Controller
             ->orderBy('name')
             ->orderBy('id')
             ->get();
-        $allTenantBillingSummaries = $allTenants->mapWithKeys(function (Tenant $tenant) use ($platformSaasType): array {
-            $tenantPackageCode = $this->tenantPackageCode($tenant, $platformSaasType);
-            $tenantPackage = CentralSetting::findPackage($tenantPackageCode, $platformSaasType);
+        $allTenantBillingSummaries = $allTenants->mapWithKeys(function (Tenant $tenant): array {
+            $tenantPlatformType = $this->normalizedTenantSaasType($tenant);
+            $tenantPackageCode = $this->tenantPackageCode($tenant, $tenantPlatformType);
+            $tenantPackage = CentralSetting::findPackage($tenantPackageCode, $tenantPlatformType);
 
             return [
                 $tenant->id => $this->tenantBillingSummary($tenant, $tenantPackage),
+            ];
+        })->all();
+        $allTenantModuleSummaries = $allTenants->mapWithKeys(fn (Tenant $tenant): array => [
+            $tenant->id => $this->tenantEntitlementResolver->summary($tenant),
+        ])->all();
+        $allTenantPackageLabels = $allTenants->mapWithKeys(function (Tenant $tenant): array {
+            $tenantPlatformType = $this->normalizedTenantSaasType($tenant);
+            $tenantPackageCode = $this->tenantPackageCode($tenant, $tenantPlatformType);
+            $tenantPackage = CentralSetting::findPackage($tenantPackageCode, $tenantPlatformType);
+
+            return [
+                $tenant->id => [
+                    'code' => $tenantPackageCode,
+                    'label' => $tenantPackage['label'] ?? ucfirst($tenantPackageCode),
+                ],
             ];
         })->all();
 
@@ -91,20 +116,52 @@ class SuperAdminTenantController extends Controller
             ->orderBy('name')
             ->orderBy('id')
             ->get();
-        $tenantBillingSummaries = $tenants->mapWithKeys(fn (Tenant $tenant): array => [
-            $tenant->id => $allTenantBillingSummaries[$tenant->id] ?? $this->tenantBillingSummary($tenant, $packageCatalog[$this->tenantPackageCode($tenant, $platformSaasType)] ?? null),
+        $tenantBillingSummaries = $tenants->mapWithKeys(function (Tenant $tenant) use ($allTenantBillingSummaries): array {
+            $tenantPlatformType = $this->normalizedTenantSaasType($tenant);
+            $packageCode = $this->tenantPackageCode($tenant, $tenantPlatformType);
+            $tenantPackage = CentralSetting::findPackage($packageCode, $tenantPlatformType);
+
+            return [
+                $tenant->id => $allTenantBillingSummaries[$tenant->id] ?? $this->tenantBillingSummary($tenant, $tenantPackage),
+            ];
+        })->all();
+        $tenantModuleSummaries = $tenants->mapWithKeys(fn (Tenant $tenant): array => [
+            $tenant->id => $allTenantModuleSummaries[$tenant->id] ?? $this->tenantEntitlementResolver->summary($tenant),
         ])->all();
+        $tenantPackageLabels = $tenants->mapWithKeys(fn (Tenant $tenant): array => [
+            $tenant->id => $allTenantPackageLabels[$tenant->id] ?? ['code' => $tenant->packageCode(), 'label' => ucfirst((string) $tenant->packageCode())],
+        ])->all();
+        $availableInvoiceHealthFilters = $this->availableInvoiceHealthFilters();
+
+        if (in_array($filterInvoiceHealth, $availableInvoiceHealthFilters, true)) {
+            $tenants = $tenants
+                ->filter(fn (Tenant $tenant): bool => (string) data_get($tenantBillingSummaries, $tenant->id . '.invoice_health.status', 'empty') === $filterInvoiceHealth)
+                ->values();
+
+            $tenantBillingSummaries = collect($tenantBillingSummaries)
+                ->only($tenants->pluck('id')->all())
+                ->all();
+            $tenantModuleSummaries = collect($tenantModuleSummaries)
+                ->only($tenants->pluck('id')->all())
+                ->all();
+            $tenantPackageLabels = collect($tenantPackageLabels)
+                ->only($tenants->pluck('id')->all())
+                ->all();
+        }
+
         $billingDashboard = $this->billingDashboardMetrics($allTenants, $allTenantBillingSummaries);
 
         return view('central.tenants', [
             'tenants' => $tenants,
             'availableSaasTypes' => $this->availableSaasTypes(),
+            'availableInvoiceHealthFilters' => $availableInvoiceHealthFilters,
             'packageCatalog' => $packageCatalog,
             'defaultPackageCode' => CentralSetting::defaultPackageCode(),
             'platformSaasType' => $platformSaasType,
             'filters' => [
                 'q' => $search,
                 'saas_type' => $filterSaasType,
+                'invoice_health' => $filterInvoiceHealth,
             ],
             'tenantTotals' => [
                 'all' => $allTenants->count(),
@@ -114,6 +171,8 @@ class SuperAdminTenantController extends Controller
                 'suspended' => $suspendedTenants,
             ],
             'tenantBillingSummaries' => $tenantBillingSummaries,
+            'tenantModuleSummaries' => $tenantModuleSummaries,
+            'tenantPackageLabels' => $tenantPackageLabels,
             'billingDashboard' => $billingDashboard,
             'centralAccent' => '#38bdf8',
         ]);
@@ -346,11 +405,12 @@ class SuperAdminTenantController extends Controller
             ? 'https://' . $tenantDomains[0]
             : null;
         $workspaceSnapshot = $this->tenantWorkspaceSnapshot($tenant);
-        $tenantPackageCode = $this->tenantPackageCode($tenant, $platformSaasType);
-        $packageCatalog = CentralSetting::packageCatalog($platformSaasType);
+        $tenantPackageCode = $this->tenantPackageCode($tenant, $tenantSaasType);
+        $packageCatalog = CentralSetting::packageCatalog($tenantSaasType);
         $tenantPackage = $packageCatalog[$tenantPackageCode] ?? null;
         $billingSummary = $this->tenantBillingSummary($tenant, $tenantPackage);
         $tenantUserWorkspace = $this->tenantUserWorkspace($tenant);
+        $tenantModuleSummary = $this->tenantEntitlementResolver->summary($tenant);
 
         return view('central.tenant-detail', [
             'tenant' => $tenant,
@@ -362,10 +422,8 @@ class SuperAdminTenantController extends Controller
             'tenantPrimaryUrl' => $tenantPrimaryUrl,
             'tenantDatabaseName' => $this->tenantDatabaseName($tenant),
             'tenantWorkspaceSnapshot' => $workspaceSnapshot,
-            'tenantRuntimeModules' => array_values(array_unique(array_merge(
-                ['BaseFeature'],
-                CentralSetting::runtimeEnabledModules($tenantSaasType)
-            ))),
+            'tenantRuntimeModules' => $this->tenantEntitlementResolver->enabledModuleNames($tenant),
+            'tenantModuleSummary' => $tenantModuleSummary,
             'tenantBlueprint' => CentralSetting::platformBlueprint($tenantSaasType),
             'packageCatalog' => $packageCatalog,
             'tenantPackageCode' => $tenantPackageCode,
@@ -422,6 +480,48 @@ class SuperAdminTenantController extends Controller
         return redirect()
             ->route('central.super-admin.tenants.index')
             ->with('status', sprintf('Tenant %s (%s) berhasil dihapus permanen.', $tenantName, $tenantId));
+    }
+
+    public function toggleModule(Request $request, string $id, string $moduleName): RedirectResponse
+    {
+        $validated = $request->validate([
+            'enabled' => ['required', 'boolean'],
+        ]);
+
+        $tenant = Tenant::query()->findOrFail($id);
+        $state = $this->tenantModuleActivationService->setTenantToggle(
+            $tenant,
+            $moduleName,
+            (bool) $validated['enabled']
+        );
+
+        if (! $state || ! $state->is_allowed) {
+            return back()->withErrors([
+                'module' => sprintf('Modul %s belum diizinkan oleh package tenant ini.', $moduleName),
+            ]);
+        }
+
+        if ((bool) ($state->module?->is_required ?? false) || $moduleName === 'BaseFeature') {
+            return back()->withErrors([
+                'module' => sprintf('Modul %s wajib aktif dan tidak bisa ditoggle manual.', $moduleName),
+            ]);
+        }
+
+        $this->auditLogger->info('tenant.module_toggled', 'Status modul tenant diperbarui.', [
+            'target_type' => 'tenant',
+            'target_id' => (string) $tenant->id,
+            'meta' => [
+                'module_name' => $moduleName,
+                'status' => $validated['enabled'] ? 'enabled' : 'disabled',
+            ],
+        ]);
+
+        return back()->with('status', sprintf(
+            'Modul %s untuk tenant %s sekarang %s.',
+            $moduleName,
+            $tenant->id,
+            $validated['enabled'] ? 'aktif' : 'nonaktif'
+        ));
     }
 
     public function storeTenantUser(Request $request, string $id): RedirectResponse
@@ -578,6 +678,9 @@ class SuperAdminTenantController extends Controller
             'saas_type' => $validated['saas_type'],
         ])->save();
 
+        $this->tenantSubscriptionService->ensureForTenant($tenant);
+        $this->tenantModuleActivationService->syncForTenant($tenant);
+
         $this->auditLogger->info('tenant.saas_switched', 'SaaS type tenant diperbarui.', [
             'target_type' => 'tenant',
             'target_id' => (string) $tenant->id,
@@ -589,11 +692,12 @@ class SuperAdminTenantController extends Controller
 
     public function assignPackage(Request $request, string $id): RedirectResponse
     {
+        $tenant = Tenant::query()->findOrFail($id);
+        $platformType = $this->normalizedTenantSaasType($tenant);
         $validated = $request->validate([
-            'package_code' => ['required', 'string', Rule::in(array_keys(CentralSetting::packageCatalog()))],
+            'package_code' => ['required', 'string', Rule::in(array_keys(CentralSetting::packageCatalog($platformType)))],
         ]);
 
-        $tenant = Tenant::query()->findOrFail($id);
         $tenant->forceFill([
             'package_code' => $validated['package_code'],
             'package_assigned_at' => now()->toIso8601String(),
@@ -602,6 +706,9 @@ class SuperAdminTenantController extends Controller
             'subscription_expires_at' => data_get($tenant, 'subscription_expires_at')
                 ?: $this->subscriptionExpiryForPackage($validated['package_code'])->toIso8601String(),
         ])->save();
+
+        $this->tenantSubscriptionService->assignPackage($tenant, $validated['package_code']);
+        $this->tenantModuleActivationService->syncForTenant($tenant);
 
         $this->auditLogger->info('tenant.package_assigned', 'Package tenant diperbarui.', [
             'target_type' => 'tenant',
@@ -646,6 +753,9 @@ class SuperAdminTenantController extends Controller
             'billing_synced_at' => now()->toIso8601String(),
         ])->save();
 
+        $this->tenantSubscriptionService->updateLifecycle($tenant, $validated);
+        $this->tenantModuleActivationService->syncForTenant($tenant);
+
         $this->auditLogger->info('tenant.billing_updated', 'Billing tenant diperbarui.', [
             'target_type' => 'tenant',
             'target_id' => (string) $tenant->id,
@@ -686,6 +796,165 @@ class SuperAdminTenantController extends Controller
             'Invoice %s berhasil dibuat untuk tenant %s sesuai periode subscription.',
             $records[0]['invoice_number'],
             $tenant->id
+        ));
+    }
+
+    public function repairInvoices(Request $request, string $id): RedirectResponse
+    {
+        $validated = $request->validate([
+            'mode' => ['nullable', 'string', Rule::in(['auto', 'legacy_to_relational', 'relational_to_legacy'])],
+            'cleanup_shadow' => ['nullable', 'boolean'],
+        ]);
+
+        $tenant = Tenant::query()->findOrFail($id);
+        $mode = (string) ($validated['mode'] ?? 'auto');
+        $cleanupShadow = $request->boolean('cleanup_shadow');
+        $result = $this->tenantSubscriptionInvoiceService->repairTenantInvoices($tenant, $mode, $cleanupShadow);
+        $action = (string) ($result['action'] ?? 'skipped');
+        $reason = (string) ($result['reason'] ?? 'noop');
+        $afterLabel = (string) data_get($result, 'after.label', 'Tidak diketahui');
+        $beforeStatus = (string) data_get($result, 'before.status', 'empty');
+        $isForcedMismatchRepair = $beforeStatus === 'mismatch' && $mode === 'relational_to_legacy';
+
+        if ($action === 'skipped' && $reason === 'manual_review_required') {
+            return back()->withErrors([
+                'invoice' => sprintf(
+                    'Repair invoice tenant %s ditahan karena status mismatch. Review invoice bentrok dulu dari audit invoice health sebelum memaksa repair.',
+                    $tenant->id
+                ),
+            ]);
+        }
+
+        if ($action === 'skipped') {
+            return back()->with('status', sprintf(
+                'Repair invoice tenant %s dilewati. Status saat ini: %s.',
+                $tenant->id,
+                $afterLabel
+            ));
+        }
+
+        $this->auditLogger->info('tenant.invoice_repaired', 'Repair invoice tenant dijalankan dari panel pusat.', [
+            'target_type' => 'tenant',
+            'target_id' => (string) $tenant->id,
+            'meta' => [
+                'mode' => $mode,
+                'forced_mismatch_repair' => $isForcedMismatchRepair,
+                'cleanup_shadow' => $cleanupShadow,
+                'action' => $action,
+                'reason' => $reason,
+                'after_status' => data_get($result, 'after.status'),
+            ],
+        ]);
+
+        return back()->with('status', sprintf(
+            '%s tenant %s selesai. Aksi: %s. Status akhir: %s.',
+            $isForcedMismatchRepair ? 'Force repair mismatch' : 'Repair invoice',
+            $tenant->id,
+            str_replace('_', ' ', $action),
+            $afterLabel
+        ));
+    }
+
+    public function bulkRepairInvoices(Request $request): RedirectResponse
+    {
+        $validated = $request->validate([
+            'q' => ['nullable', 'string'],
+            'saas_type' => ['nullable', 'string'],
+            'invoice_health' => ['required', 'string', Rule::in($this->actionableInvoiceHealthFilters())],
+        ]);
+
+        $search = trim((string) ($validated['q'] ?? ''));
+        $filterSaasType = (string) ($validated['saas_type'] ?? '');
+        $filterInvoiceHealth = (string) $validated['invoice_health'];
+        $strategy = $this->bulkRepairStrategyForInvoiceHealth($filterInvoiceHealth);
+        $tenantQuery = Tenant::query();
+
+        if ($search !== '') {
+            $tenantQuery->where(function ($query) use ($search): void {
+                $query->where('id', 'like', '%' . $search . '%')
+                    ->orWhere('name', 'like', '%' . $search . '%');
+            });
+        }
+
+        if (in_array($filterSaasType, $this->availableSaasTypes(), true)) {
+            $tenantQuery->where(function ($query) use ($filterSaasType): void {
+                if ($filterSaasType === 'universal') {
+                    $query->where('saas_type', $filterSaasType)
+                        ->orWhereNull('saas_type');
+
+                    return;
+                }
+
+                $query->where('saas_type', $filterSaasType);
+            });
+        }
+
+        $tenants = $tenantQuery
+            ->orderBy('name')
+            ->orderBy('id')
+            ->get();
+
+        $tenantBillingSummaries = $tenants->mapWithKeys(function (Tenant $tenant): array {
+            $tenantPlatformType = $this->normalizedTenantSaasType($tenant);
+            $packageCode = $this->tenantPackageCode($tenant, $tenantPlatformType);
+            $tenantPackage = CentralSetting::findPackage($packageCode, $tenantPlatformType);
+
+            return [
+                $tenant->id => $this->tenantBillingSummary($tenant, $tenantPackage),
+            ];
+        });
+
+        $targetTenants = $tenants
+            ->filter(fn (Tenant $tenant): bool => (string) data_get($tenantBillingSummaries, $tenant->id . '.invoice_health.status', 'empty') === $filterInvoiceHealth)
+            ->values();
+
+        if ($targetTenants->isEmpty()) {
+            return back()->withErrors([
+                'invoice' => sprintf(
+                    'Bulk repair tidak menemukan tenant dengan status invoice health %s untuk filter saat ini.',
+                    str_replace('_', ' ', $filterInvoiceHealth)
+                ),
+            ]);
+        }
+
+        $results = $targetTenants->map(function (Tenant $tenant) use ($strategy): array {
+            return $this->tenantSubscriptionInvoiceService->repairTenantInvoices(
+                $tenant,
+                $strategy['mode'],
+                $strategy['cleanup_shadow']
+            );
+        })->values();
+
+        $changedCount = $results->filter(fn (array $result): bool => (string) ($result['action'] ?? 'skipped') !== 'skipped')->count();
+        $skippedCount = $results->count() - $changedCount;
+        $changedTenantIds = $results
+            ->filter(fn (array $result): bool => (string) ($result['action'] ?? 'skipped') !== 'skipped')
+            ->pluck('tenant_id')
+            ->take(3)
+            ->implode(', ');
+
+        $this->auditLogger->info('tenant.invoice_bulk_repaired', 'Bulk repair invoice tenant dijalankan dari panel pusat.', [
+            'target_type' => 'tenant',
+            'target_id' => $filterInvoiceHealth,
+            'meta' => [
+                'search' => $search,
+                'saas_type' => $filterSaasType,
+                'invoice_health' => $filterInvoiceHealth,
+                'mode' => $strategy['mode'],
+                'cleanup_shadow' => $strategy['cleanup_shadow'],
+                'target_count' => $targetTenants->count(),
+                'changed_count' => $changedCount,
+                'skipped_count' => $skippedCount,
+            ],
+        ]);
+
+        return back()->with('status', sprintf(
+            'Bulk %s selesai untuk %d tenant. %d berubah, %d dilewati.%s',
+            $strategy['label'],
+            $targetTenants->count(),
+            $changedCount,
+            $skippedCount,
+            $changedTenantIds !== '' ? ' Contoh tenant: ' . $changedTenantIds . '.' : ''
         ));
     }
 
@@ -985,45 +1254,28 @@ class SuperAdminTenantController extends Controller
         ]);
 
         $tenant = Tenant::query()->findOrFail($id);
-        $updated = false;
         $updatedAt = CarbonImmutable::now();
+        $storedInvoice = $this->mutateTenantInvoice($tenant, $validated['invoice_number'], function (array $invoice) use ($validated, $updatedAt): array {
+            $invoice['status'] = $validated['status'];
+            $invoice['paid_at'] = $validated['status'] === 'paid' ? $updatedAt : null;
 
-        $billingInvoices = collect($tenant->billingInvoices())
-            ->map(function (array $invoice) use ($validated, $updatedAt, &$updated): array {
-                if ($invoice['invoice_number'] !== $validated['invoice_number']) {
-                    return $this->normalizeInvoiceRecordForStorage($invoice);
-                }
+            if ($validated['status'] !== 'paid') {
+                $invoice['payment']['status'] = $validated['status'] === 'void'
+                    ? 'void'
+                    : (string) data_get($invoice, 'payment.status', '');
+            }
 
-                $updated = true;
-                $invoice['status'] = $validated['status'];
-                $invoice['paid_at'] = $validated['status'] === 'paid' ? $updatedAt : null;
+            return $invoice;
+        });
 
-                if ($validated['status'] !== 'paid') {
-                    $invoice['payment']['status'] = $validated['status'] === 'void' ? 'void' : (string) data_get($invoice, 'payment.status', '');
-                }
-
-                return $this->normalizeInvoiceRecordForStorage($invoice);
-            })
-            ->all();
-
-        if (! $updated) {
+        if (! is_array($storedInvoice)) {
             return back()->withErrors([
                 'invoice' => 'Invoice tenant tidak ditemukan.',
             ]);
         }
 
-        $tenant->forceFill([
-            'billing_invoices' => $billingInvoices,
-            'last_invoice_status_updated_at' => $updatedAt->toIso8601String(),
-        ])->save();
-
         if ($validated['status'] === 'paid') {
-            $invoice = collect($tenant->billingInvoices())
-                ->firstWhere('invoice_number', $validated['invoice_number']);
-
-            if (is_array($invoice)) {
-                $this->dispatchPaymentSuccessNotifications($tenant, $invoice);
-            }
+            $this->dispatchPaymentSuccessNotifications($tenant, $storedInvoice);
         }
 
         $this->auditLogger->info('tenant.invoice_status_updated', 'Status invoice tenant diperbarui.', [
@@ -1124,6 +1376,53 @@ class SuperAdminTenantController extends Controller
         return CentralSetting::availablePlatformTypes();
     }
 
+    protected function availableInvoiceHealthFilters(): array
+    {
+        return [
+            'relational_only',
+            'relational_shadow',
+            'legacy_only',
+            'mismatch',
+            'empty',
+            'tables_missing',
+        ];
+    }
+
+    protected function actionableInvoiceHealthFilters(): array
+    {
+        return [
+            'relational_shadow',
+            'legacy_only',
+            'mismatch',
+        ];
+    }
+
+    protected function bulkRepairStrategyForInvoiceHealth(string $invoiceHealthStatus): array
+    {
+        return match ($invoiceHealthStatus) {
+            'legacy_only' => [
+                'mode' => 'auto',
+                'cleanup_shadow' => true,
+                'label' => 'repair legacy ke relasional',
+            ],
+            'relational_shadow' => [
+                'mode' => 'auto',
+                'cleanup_shadow' => true,
+                'label' => 'cleanup shadow legacy',
+            ],
+            'mismatch' => [
+                'mode' => 'relational_to_legacy',
+                'cleanup_shadow' => false,
+                'label' => 'force repair mismatch',
+            ],
+            default => [
+                'mode' => 'auto',
+                'cleanup_shadow' => false,
+                'label' => 'repair invoice',
+            ],
+        };
+    }
+
     protected function normalizedTenantSaasType(Tenant $tenant): string
     {
         $saasType = (string) data_get($tenant, 'saas_type', 'universal');
@@ -1152,7 +1451,7 @@ class SuperAdminTenantController extends Controller
             ? CentralSetting::packageBillingInvoice(
                 $tenantPackage,
                 $usage,
-                ! filled(data_get($tenant, 'first_invoice_issued_at'))
+                ! $tenant->firstInvoiceIssuedAt()
             )
             : [
                 'usage' => $usage,
@@ -1168,11 +1467,15 @@ class SuperAdminTenantController extends Controller
             'expires_at' => $tenant->subscriptionExpiresAt(),
             'grace_until' => $tenant->subscriptionGraceUntil(),
             'access_block' => $tenant->accessBlockMeta(),
+            'invoice_health' => $this->tenantSubscriptionInvoiceService->invoiceHealthForTenant($tenant),
             'usage' => $usage,
             'invoice' => $invoice,
             'invoices' => $invoices,
             'latest_invoice' => $invoices[0] ?? null,
             'collectible_invoice' => $tenant->oldestCollectibleInvoice(),
+            'first_invoice_issued_at' => $tenant->firstInvoiceIssuedAt(),
+            'last_invoice_generated_at' => $tenant->lastInvoiceGeneratedAt(),
+            'last_invoice_status_updated_at' => $tenant->lastInvoiceStatusUpdatedAt(),
             'last_synced_at' => $this->parseIsoTimestamp(data_get($tenant, 'billing_synced_at')),
         ];
     }
@@ -1222,7 +1525,7 @@ class SuperAdminTenantController extends Controller
         $sequence = $tenant->invoiceSequence();
         $records = [];
         $issuedAt = CarbonImmutable::now();
-        $shouldIncludeSetupFee = ! filled(data_get($tenant, 'first_invoice_issued_at'));
+        $shouldIncludeSetupFee = ! $tenant->firstInvoiceIssuedAt();
         $reservedExpectedAmounts = [];
 
         foreach ($periodStarts as $periodStart) {
@@ -1245,15 +1548,7 @@ class SuperAdminTenantController extends Controller
             $shouldIncludeSetupFee = false;
         }
 
-        $tenant->forceFill([
-            'invoice_sequence' => $sequence,
-            'billing_invoices' => array_values(array_map(
-                fn (array $invoice): array => $this->normalizeInvoiceRecordForStorage($invoice),
-                $existingInvoices
-            )),
-            'last_invoice_generated_at' => $issuedAt->toIso8601String(),
-            'first_invoice_issued_at' => data_get($tenant, 'first_invoice_issued_at') ?: $issuedAt->toIso8601String(),
-        ])->save();
+        $this->tenantSubscriptionInvoiceService->syncTenantInvoices($tenant, $existingInvoices);
 
         return $records;
     }
@@ -1391,7 +1686,16 @@ class SuperAdminTenantController extends Controller
         $invoicePaidCount = 0;
         $invoiceOverdueCount = 0;
         $expiringSoonCount = 0;
+        $invoiceHealthCounts = [
+            'relational_only' => 0,
+            'relational_shadow' => 0,
+            'legacy_only' => 0,
+            'mismatch' => 0,
+            'empty' => 0,
+            'tables_missing' => 0,
+        ];
         $watchlist = [];
+        $invoiceHealthWatchlist = [];
         $now = CarbonImmutable::now();
 
         foreach ($tenants as $tenant) {
@@ -1399,6 +1703,13 @@ class SuperAdminTenantController extends Controller
 
             if (! is_array($summary)) {
                 continue;
+            }
+
+            $invoiceHealthStatus = (string) data_get($summary, 'invoice_health.status', 'empty');
+            if (array_key_exists($invoiceHealthStatus, $invoiceHealthCounts)) {
+                $invoiceHealthCounts[$invoiceHealthStatus]++;
+            } else {
+                $invoiceHealthCounts['empty']++;
             }
 
             $latestInvoice = $summary['latest_invoice'] ?? null;
@@ -1463,6 +1774,19 @@ class SuperAdminTenantController extends Controller
                     'detail_url' => route('central.super-admin.tenants.show', $tenant->id),
                 ];
             }
+
+            if (in_array($invoiceHealthStatus, ['mismatch', 'legacy_only', 'relational_shadow'], true)) {
+                $invoiceHealthWatchlist[] = [
+                    'tenant_id' => $tenant->id,
+                    'tenant_name' => (string) ($tenant->name ?? $tenant->id),
+                    'health_status' => $invoiceHealthStatus,
+                    'health_label' => (string) data_get($summary, 'invoice_health.label', 'Kosong'),
+                    'relational_count' => (int) data_get($summary, 'invoice_health.relational_count', 0),
+                    'legacy_count' => (int) data_get($summary, 'invoice_health.legacy_count', 0),
+                    'mismatch_invoice_numbers' => array_values((array) data_get($summary, 'invoice_health.mismatch_invoice_numbers', [])),
+                    'detail_url' => route('central.super-admin.tenants.show', $tenant->id),
+                ];
+            }
         }
 
         usort($watchlist, static function (array $left, array $right): int {
@@ -1470,6 +1794,16 @@ class SuperAdminTenantController extends Controller
             $rightGrace = $right['grace_ends_at'] instanceof CarbonImmutable ? $right['grace_ends_at']->getTimestamp() : PHP_INT_MAX;
 
             return $leftGrace <=> $rightGrace;
+        });
+
+        usort($invoiceHealthWatchlist, static function (array $left, array $right): int {
+            $priority = [
+                'mismatch' => 0,
+                'legacy_only' => 1,
+                'relational_shadow' => 2,
+            ];
+
+            return ($priority[$left['health_status']] ?? 99) <=> ($priority[$right['health_status']] ?? 99);
         });
 
         return [
@@ -1483,7 +1817,9 @@ class SuperAdminTenantController extends Controller
             'invoice_paid_count' => $invoicePaidCount,
             'invoice_overdue_count' => $invoiceOverdueCount,
             'expiring_soon_count' => $expiringSoonCount,
+            'invoice_health' => $invoiceHealthCounts,
             'watchlist' => array_slice($watchlist, 0, 5),
+            'invoice_health_watchlist' => array_slice($invoiceHealthWatchlist, 0, 6),
         ];
     }
 
@@ -1525,30 +1861,7 @@ class SuperAdminTenantController extends Controller
 
     protected function mutateTenantInvoice(Tenant $tenant, string $invoiceNumber, callable $mutator): ?array
     {
-        $updated = null;
-        $billingInvoices = collect($tenant->billingInvoices())
-            ->map(function (array $invoice) use ($invoiceNumber, $mutator, &$updated): array {
-                if ($invoice['invoice_number'] !== $invoiceNumber) {
-                    return $this->normalizeInvoiceRecordForStorage($invoice);
-                }
-
-                $mutated = $mutator($invoice);
-                $updated = $mutated;
-
-                return $this->normalizeInvoiceRecordForStorage($mutated);
-            })
-            ->all();
-
-        if (! is_array($updated)) {
-            return null;
-        }
-
-        $tenant->forceFill([
-            'billing_invoices' => $billingInvoices,
-            'last_invoice_status_updated_at' => CarbonImmutable::now()->toIso8601String(),
-        ])->save();
-
-        return $updated;
+        return $this->tenantSubscriptionInvoiceService->mutateInvoice($tenant, $invoiceNumber, $mutator);
     }
 
     protected function normalizeInvoicePaymentForStorage(array $payment): array

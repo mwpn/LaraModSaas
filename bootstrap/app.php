@@ -16,6 +16,7 @@ return Application::configure(basePath: dirname(__DIR__))
         $middleware->group('tenant_api_web', AppServiceProvider::tenantRouteMiddleware());
         $middleware->alias([
             'central.permission' => \App\Http\Middleware\EnsureCentralPermission::class,
+            'tenant.not_meter_reader' => \App\Http\Middleware\EnsureTenantNotMeterReader::class,
         ]);
         $middleware->redirectGuestsTo('/login');
     })

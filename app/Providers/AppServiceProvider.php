@@ -6,6 +6,7 @@ namespace App\Providers;
 
 use App\Http\Middleware\EnsureTenantIsActive;
 use App\Models\CentralSetting;
+use App\Services\Central\TenantEntitlementResolver;
 use Illuminate\Cache\RateLimiting\Limit;
 use Illuminate\Http\Request;
 use Illuminate\Support\Fluent;
@@ -103,9 +104,13 @@ class AppServiceProvider extends ServiceProvider
                 $modules
             ));
 
+            /** @var TenantEntitlementResolver $resolver */
+            $resolver = app(TenantEntitlementResolver::class);
             $enabled = array_values(array_unique(array_merge(
                 ['BaseFeature'],
-                CentralSetting::runtimeEnabledModules($saasType)
+                $tenant instanceof \App\Models\Tenant
+                    ? $resolver->enabledModuleNames($tenant)
+                    : CentralSetting::runtimeEnabledModules($saasType)
             )));
 
             $statuses = [];

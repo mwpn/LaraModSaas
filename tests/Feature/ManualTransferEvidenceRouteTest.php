@@ -8,6 +8,7 @@ use App\Models\CentralSetting;
 use App\Models\Tenant;
 use App\Services\Central\CentralAuditLogger;
 use App\Services\Central\ManualTransferService;
+use App\Services\Central\TenantSubscriptionInvoiceService;
 use Illuminate\Database\Schema\Blueprint;
 use Illuminate\Support\Facades\Schema;
 use Tests\TestCase;
@@ -221,7 +222,7 @@ class ManualTransferEvidenceRouteTest extends TestCase
             ],
         ]);
 
-        $service = new ManualTransferService(new CentralAuditLogger());
+        $service = new ManualTransferService(new CentralAuditLogger(), new TenantSubscriptionInvoiceService());
         $allocation = $service->allocateUniqueCode(125000, [125322]);
 
         self::assertSame(125000, $allocation['base_amount']);

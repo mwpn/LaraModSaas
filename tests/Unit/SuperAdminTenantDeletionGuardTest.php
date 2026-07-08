@@ -6,9 +6,18 @@ namespace Tests\Unit;
 
 use App\Http\Controllers\Central\SuperAdminTenantController;
 use App\Models\Tenant;
+use App\Services\Central\BillingNotificationService;
 use App\Services\Central\CentralAuditLogger;
+use App\Services\Central\ManualTransferService;
 use App\Services\Central\MessageTemplateRenderer;
+use App\Services\Central\PlatformModuleCatalogService;
+use App\Services\Central\SubscriptionPackageCatalogService;
+use App\Services\Central\TenantEntitlementResolver;
+use App\Services\Central\TenantModuleActivationService;
+use App\Services\Central\TenantSubscriptionInvoiceService;
+use App\Services\Central\TenantSubscriptionService;
 use Carbon\CarbonImmutable;
+use Illuminate\Config\Repository as ConfigRepository;
 use Illuminate\Container\Container;
 use Illuminate\Support\Facades\Facade;
 use Illuminate\Support\Facades\Validator;
@@ -27,10 +36,34 @@ class SuperAdminTenantDeletionGuardTest extends TestCase
         $container = new Container();
         $translator = new Translator(new ArrayLoader(), 'en');
         $validatorFactory = new ValidationFactory($translator, $container);
+        $config = new ConfigRepository([
+            'database.default' => 'testing',
+            'tenancy.database.central_connection' => 'testing',
+        ]);
 
         $container->instance('validator', $validatorFactory);
         $container->instance('translator', $translator);
+        $container->instance('config', $config);
+        $container->instance(TenantSubscriptionInvoiceService::class, new class extends TenantSubscriptionInvoiceService
+        {
+            public function invoicesForTenant(Tenant|string $tenant): array
+            {
+                return [];
+            }
 
+            public function aggregateForTenant(Tenant|string $tenant): array
+            {
+                return [
+                    'count' => 0,
+                    'max_sequence' => 0,
+                    'first_issued_at' => null,
+                    'last_generated_at' => null,
+                    'last_status_updated_at' => null,
+                ];
+            }
+        });
+
+        Container::setInstance($container);
         Facade::setFacadeApplication($container);
         Validator::swap($validatorFactory);
     }
@@ -103,7 +136,23 @@ class SuperAdminTenantDeletionGuardTest extends TestCase
 
     protected function makeController(): object
     {
-        return new class(new CentralAuditLogger(), new MessageTemplateRenderer()) extends SuperAdminTenantController
+        $auditLogger = new CentralAuditLogger();
+        $invoiceService = new TenantSubscriptionInvoiceService();
+        $packageCatalogService = new SubscriptionPackageCatalogService(new PlatformModuleCatalogService());
+        $subscriptionService = new TenantSubscriptionService($packageCatalogService);
+        $moduleActivationService = new TenantModuleActivationService($subscriptionService);
+        $entitlementResolver = new TenantEntitlementResolver($moduleActivationService);
+
+        return new class(
+            $auditLogger,
+            new BillingNotificationService($auditLogger, new MessageTemplateRenderer()),
+            new ManualTransferService($auditLogger, $invoiceService),
+            new MessageTemplateRenderer(),
+            $subscriptionService,
+            $moduleActivationService,
+            $entitlementResolver,
+            $invoiceService
+        ) extends SuperAdminTenantController
         {
             public function guardDelete(Tenant $tenant): void
             {

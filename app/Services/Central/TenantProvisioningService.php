@@ -16,6 +16,12 @@ use Throwable;
 
 class TenantProvisioningService
 {
+    public function __construct(
+        protected TenantSubscriptionService $tenantSubscriptionService,
+        protected TenantModuleActivationService $tenantModuleActivationService,
+    ) {
+    }
+
     public function provision(string $businessName, string $subdomain, ?string $saasType = null): Tenant
     {
         $businessName = trim($businessName);
@@ -43,6 +49,9 @@ class TenantProvisioningService
             $tenant->domains()->create([
                 'domain' => $subdomain,
             ]);
+
+            $this->tenantSubscriptionService->assignPackage($tenant, $defaultPackageCode);
+            $this->tenantModuleActivationService->syncForTenant($tenant);
 
             $centralConnection->commit();
 
